@@ -400,7 +400,10 @@ const smtpConfig = () => {
   const port = Number(process.env.SMTP_PORT || 587);
   const user = (process.env.SMTP_USER || process.env.SMTP_EMAIL)?.trim();
   const password = process.env.SMTP_PASSWORD;
-  const from = (process.env.SMTP_FROM_EMAIL || process.env.SMTP_EMAIL || user)?.trim();
+  let from = (process.env.SMTP_FROM_EMAIL || process.env.SMTP_EMAIL || user)?.trim();
+  if (from && from.endsWith('.comss')) {
+    from = from.replace(/\.comss$/i, '.com');
+  }
   const secure = String(process.env.SMTP_SECURE ?? (port === 465)).toLowerCase() === 'true';
   if (!host || !Number.isInteger(port) || port < 1 || port > 65535 || !user || !password || !from) {
     throw new SmtpConfigurationError('Email delivery is not configured. Missing required settings: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, and SMTP_FROM_EMAIL.');
@@ -465,45 +468,159 @@ const maskEmail = (email) => {
   const [local, domain] = email.split('@');
   return `${local.slice(0, 2)}${'*'.repeat(Math.max(1, local.length - 2))}@${domain}`;
 };
-const sendVerificationEmail = async (email, code) => {
+
+const resolveResendSender = () => {
+  // 1. Explicit verified domain sender for Resend if configured
+  if (process.env.RESEND_FROM_EMAIL?.trim()) {
+    let sender = process.env.RESEND_FROM_EMAIL.trim();
+    return sender.includes('<') ? sender : `BugTrack Pro <${sender}>`;
+  }
+
+  // 2. Inspect SMTP_FROM_EMAIL / SMTP_USER
+  let configuredFrom = (process.env.SMTP_FROM_EMAIL || process.env.SMTP_EMAIL || process.env.SMTP_USER || '').trim();
+  if (configuredFrom.endsWith('.comss')) {
+    configuredFrom = configuredFrom.replace(/\.comss$/i, '.com');
+  }
+
+  const domain = configuredFrom.split('@')[1]?.toLowerCase();
+  const publicWebmailDomains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 'live.com', 'aol.com'];
+
+  // If sender domain is an unverified public webmail domain (like gmail.com),
+  // Resend strictly requires using onboarding@resend.dev unless a custom domain is verified.
+  if (!domain || publicWebmailDomains.includes(domain)) {
+    return 'BugTrack Pro <onboarding@resend.dev>';
+  }
+
+  return configuredFrom.includes('<') ? configuredFrom : `BugTrack Pro <${configuredFrom}>`;
+};
+
+const sendAppEmail = async ({ to, subject, text, html, replyTo }) => {
+  const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER === 'true';
+  const resendApiKey = process.env.RESEND_API_KEY?.trim();
+
+  // 1. Resend API delivery (HTTPS port 443 — reliable across cloud hosts and Render free tier)
+  if (resendApiKey) {
+    const from = resolveResendSender();
+    let effectiveReplyTo = replyTo || (process.env.SMTP_FROM_EMAIL || process.env.SMTP_EMAIL || process.env.SMTP_USER)?.trim()?.replace(/\.comss$/i, '.com') || undefined;
+    if (effectiveReplyTo && effectiveReplyTo.endsWith('.comss')) {
+      effectiveReplyTo = effectiveReplyTo.replace(/\.comss$/i, '.com');
+    }
+
+    console.log(`[EMAIL] Delivering email to ${maskEmail(to)} via Resend API (HTTPS 443, from: ${from.replace(/<.*>/, '<configured-sender>')})...`);
+
+    try {
+      const payload = {
+        from,
+        to: [to],
+        subject,
+        text,
+        html,
+        ...(effectiveReplyTo ? { reply_to: effectiveReplyTo } : {})
+      };
+
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${resendApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (res.ok) {
+        const resData = await res.json().catch(() => ({}));
+        if (!resData?.id) {
+          throw new Error('Resend API returned HTTP 200/201 but omitted message ID.');
+        }
+        console.log(`[EMAIL] Email delivered successfully via Resend to ${maskEmail(to)} (MessageID: ${resData.id})`);
+        return { messageId: resData.id, provider: 'resend' };
+      }
+
+      let errorMsg = '';
+      try {
+        const errJson = await res.json();
+        errorMsg = errJson.message || JSON.stringify(errJson);
+      } catch {
+        errorMsg = await res.text().catch(() => res.statusText);
+      }
+
+      console.error(`[EMAIL] Resend API error (${res.status}) for ${maskEmail(to)}: ${errorMsg}`);
+
+      // On Render or production, outbound SMTP ports 25, 465, 587 are blocked, so fail immediately with clear diagnostic
+      if (isProduction || process.env.RENDER === 'true' || !process.env.SMTP_HOST) {
+        throw new Error(`Resend email delivery failed (${res.status}): ${errorMsg}`);
+      }
+
+      console.warn('[EMAIL] Falling back to local SMTP delivery...');
+    } catch (apiErr) {
+      if (isProduction || process.env.RENDER === 'true' || !process.env.SMTP_HOST) {
+        throw apiErr;
+      }
+      console.warn(`[EMAIL] Resend error: ${apiErr.message}. Attempting local SMTP fallback...`);
+    }
+  }
+
+  // 2. Standard SMTP Delivery (e.g. Gmail SMTP for Localhost)
   const config = smtpConfig();
   const transporter = createSmtpTransporter();
   try {
     const info = await sendMailSafe(transporter, {
       from: `"BugTrack Pro" <${config.from}>`,
-      to: email,
-      subject: 'Verify your BugTrack Pro email',
-      text: `Your BugTrack Pro verification code is ${code}. It expires in ${verificationExpiryMinutes} minutes.\n\nIf you did not request this code, you can safely ignore this email.`,
-      html: `
-        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 28px 20px; background-color: #ffffff; color: #1e293b; border: 1px solid #e2e8f0; border-radius: 8px;">
-          <div style="margin-bottom: 20px;">
-            <h2 style="margin: 0; color: #0f172a; font-size: 22px;">BugTrack <span style="color: #2563eb;">Pro</span></h2>
-            <p style="margin: 4px 0 0 0; color: #64748b; font-size: 13px;">Software Testing &amp; Bug Management</p>
-          </div>
-          <h3 style="margin: 0 0 12px 0; color: #1e293b; font-size: 17px;">Verify your email address</h3>
-          <p style="margin: 0 0 16px 0; font-size: 14px; line-height: 1.5; color: #334155;">
-            Thank you for registering with BugTrack Pro. Use the verification code below to complete your registration:
-          </p>
-          <div style="font-size: 32px; font-weight: 700; letter-spacing: 6px; color: #2563eb; background-color: #f1f5f9; padding: 16px; text-align: center; border-radius: 6px; margin: 20px 0;">
-            ${code}
-          </div>
-          <p style="margin: 0 0 8px 0; font-size: 13px; color: #64748b;">
-            This code will expire in <strong>${verificationExpiryMinutes} minutes</strong>.
-          </p>
-          <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
-          <p style="margin: 0; font-size: 12px; color: #94a3b8;">
-            If you did not request this account, please disregard this email.
-          </p>
-        </div>
-      `,
+      replyTo: replyTo || config.from,
+      to,
+      subject,
+      text,
+      html,
     });
-    console.log(`[EMAIL] Verification email sent to ${maskEmail(email)} (MessageID: ${info?.messageId || 'sent'})`);
-    return info;
+    if (info && (info.messageId || info.accepted?.length > 0)) {
+      console.log(`[EMAIL] Email delivered via SMTP to ${maskEmail(to)} (MessageID: ${info?.messageId || 'sent'})`);
+      return { messageId: info.messageId, provider: 'smtp' };
+    }
+    throw new Error('SMTP transport did not confirm message acceptance.');
   } catch (error) {
-    console.error(`[EMAIL] Failed to send verification email to ${maskEmail(email)}:`, error.message);
-    throw new SmtpDeliveryError(error);
+    if (error.code === 'ETIMEDOUT' || error.message?.includes('timed out')) {
+      console.error(`[EMAIL] SMTP connection timed out for ${maskEmail(to)}. Note: On Render free tier, outbound SMTP ports (25, 465, 587) are blocked. Use RESEND_API_KEY.`);
+      throw new SmtpDeliveryError(error, 'timeout');
+    }
+    if (error.code === 'EAUTH' || error.responseCode === 535) {
+      console.error(`[EMAIL] SMTP authentication failed for ${config.user}. Verify your Google App Password / SMTP credentials.`);
+      throw new SmtpDeliveryError(error, 'auth');
+    }
+    console.error(`[EMAIL] Failed to send email to ${maskEmail(to)}: [${error.code || 'UNKNOWN'}] ${error.message}`);
+    throw new SmtpDeliveryError(error, 'delivery');
   }
 };
+
+const sendVerificationEmail = async (email, code) => {
+  return sendAppEmail({
+    to: email,
+    subject: 'Verify your BugTrack Pro email',
+    text: `Your BugTrack Pro verification code is ${code}. It expires in ${verificationExpiryMinutes} minutes.\n\nIf you did not request this code, you can safely ignore this email.`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 28px 20px; background-color: #ffffff; color: #1e293b; border: 1px solid #e2e8f0; border-radius: 8px;">
+        <div style="margin-bottom: 20px;">
+          <h2 style="margin: 0; color: #0f172a; font-size: 22px;">BugTrack <span style="color: #2563eb;">Pro</span></h2>
+          <p style="margin: 4px 0 0 0; color: #64748b; font-size: 13px;">Software Testing &amp; Bug Management</p>
+        </div>
+        <h3 style="margin: 0 0 12px 0; color: #1e293b; font-size: 17px;">Verify your email address</h3>
+        <p style="margin: 0 0 16px 0; font-size: 14px; line-height: 1.5; color: #334155;">
+          Thank you for registering with BugTrack Pro. Use the verification code below to complete your registration:
+        </p>
+        <div style="font-size: 32px; font-weight: 700; letter-spacing: 6px; color: #2563eb; background-color: #f1f5f9; padding: 16px; text-align: center; border-radius: 6px; margin: 20px 0;">
+          ${code}
+        </div>
+        <p style="margin: 0 0 8px 0; font-size: 13px; color: #64748b;">
+          This code will expire in <strong>${verificationExpiryMinutes} minutes</strong>.
+        </p>
+        <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
+        <p style="margin: 0; font-size: 12px; color: #94a3b8;">
+          If you did not request this account, please disregard this email.
+        </p>
+      </div>
+    `,
+  });
+};
+
 const resolveResetBaseUrl = (req) => {
   // 1. Primary authority: Configured environment variables (FRONTEND_URL or APP_URL)
   const envUrl = (process.env.FRONTEND_URL || process.env.APP_URL || '').trim().replace(/\/+$/, '');
@@ -534,13 +651,9 @@ const resolveResetBaseUrl = (req) => {
   }
 
   // In development:
-  // If the user has configured FRONTEND_URL or APP_URL (e.g. deployed domain, LAN IP, or tunnel),
-  // honor it so password reset links can be opened on both laptops and mobile devices.
   if (envUrl) {
     return envUrl;
   }
-
-  // Otherwise, use verified request origin if available, or default to standard local Vite dev URL
   if (origin && isAllowedOrigin(origin)) {
     return origin;
   }
@@ -550,114 +663,36 @@ const resolveResetBaseUrl = (req) => {
 const sendPasswordResetEmail = async (email, token, baseUrl) => {
   const resetUrl = `${baseUrl.replace(/\/$/, '')}/?resetToken=${encodeURIComponent(token)}`;
 
-  // 1. Optional: If Resend API key is configured (HTTPS port 443, works seamlessly on Render free tier)
-  if (process.env.RESEND_API_KEY?.trim()) {
-    try {
-      console.log(`[EMAIL] Attempting delivery to ${maskEmail(email)} via Resend API (port 443)...`);
-      const fromAddr = process.env.SMTP_FROM_EMAIL || process.env.SMTP_EMAIL || 'onboarding@resend.dev';
-      const res = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${process.env.RESEND_API_KEY.trim()}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from: fromAddr.includes('<') ? fromAddr : `BugTrack Pro <${fromAddr}>`,
-          to: [email],
-          subject: 'Reset your BugTrack Pro password',
-          text: `You recently requested to reset your password for BugTrack Pro.\n\nUse this link to reset your password (expires in ${passwordResetExpiryMinutes} minutes):\n${resetUrl}\n\nIf you did not request a password reset, you can safely ignore this email. Your password will not change.`,
-          html: `
-            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 560px; margin: 0 auto; padding: 32px 24px; background-color: #ffffff; color: #1e293b; border: 1px solid #e2e8f0; border-radius: 8px;">
-              <div style="margin-bottom: 24px;">
-                <h2 style="margin: 0; color: #0f172a; font-size: 22px; font-weight: 700;">BugTrack <span style="color: #2563eb;">Pro</span></h2>
-                <p style="margin: 4px 0 0 0; color: #64748b; font-size: 14px;">Software Testing &amp; Bug Management</p>
-              </div>
-              <h3 style="margin: 0 0 16px 0; color: #1e293b; font-size: 18px;">Reset your password</h3>
-              <p style="margin: 0 0 20px 0; font-size: 15px; line-height: 1.5; color: #334155;">
-                We received a request to reset the password for your BugTrack Pro account (<strong>${maskEmail(email)}</strong>). Click the button below to set a new password:
-              </p>
-              <div style="margin: 28px 0;">
-                <a href="${resetUrl}" style="background-color: #2563eb; color: #ffffff; padding: 12px 28px; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 15px; display: inline-block;">Reset Password</a>
-              </div>
-              <p style="margin: 0 0 12px 0; font-size: 13px; color: #64748b; line-height: 1.5;">
-                This link will expire in <strong>${passwordResetExpiryMinutes} minutes</strong>. If the button does not work, copy and paste this link into your browser:
-              </p>
-              <p style="margin: 0 0 24px 0; word-break: break-all; font-size: 13px; color: #2563eb;">
-                <a href="${resetUrl}" style="color: #2563eb;">${resetUrl}</a>
-              </p>
-              <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;" />
-              <p style="margin: 0; font-size: 12px; color: #94a3b8;">
-                If you did not request this password reset, no action is needed. Your account remains secure.
-              </p>
-            </div>
-          `,
-        }),
-      });
-      if (res.ok) {
-        const resData = await res.json();
-        console.log(`[EMAIL] Password reset email confirmed by Resend for ${maskEmail(email)} (ID: ${resData.id})`);
-        return { messageId: resData.id };
-      }
-      const errText = await res.text();
-      console.warn(`[EMAIL] Resend returned ${res.status}, falling back to SMTP: ${errText}`);
-    } catch (apiErr) {
-      console.warn(`[EMAIL] Resend API error, falling back to SMTP: ${apiErr.message}`);
-    }
-  }
-
-  // 2. Standard SMTP Delivery
-  const config = smtpConfig();
-  const transporter = createSmtpTransporter();
-  try {
-    const info = await sendMailSafe(transporter, {
-      from: `"BugTrack Pro" <${config.from}>`,
-      replyTo: config.from,
-      to: email,
-      subject: 'Reset your BugTrack Pro password',
-      text: `You recently requested to reset your password for BugTrack Pro.\n\nUse this link to reset your password (expires in ${passwordResetExpiryMinutes} minutes):\n${resetUrl}\n\nIf you did not request a password reset, you can safely ignore this email. Your password will not change.`,
-      html: `
-        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 560px; margin: 0 auto; padding: 32px 24px; background-color: #ffffff; color: #1e293b; border: 1px solid #e2e8f0; border-radius: 8px;">
-          <div style="margin-bottom: 24px;">
-            <h2 style="margin: 0; color: #0f172a; font-size: 22px; font-weight: 700;">BugTrack <span style="color: #2563eb;">Pro</span></h2>
-            <p style="margin: 4px 0 0 0; color: #64748b; font-size: 14px;">Software Testing &amp; Bug Management</p>
-          </div>
-          <h3 style="margin: 0 0 16px 0; color: #1e293b; font-size: 18px;">Reset your password</h3>
-          <p style="margin: 0 0 20px 0; font-size: 15px; line-height: 1.5; color: #334155;">
-            We received a request to reset the password for your BugTrack Pro account (<strong>${maskEmail(email)}</strong>). Click the button below to set a new password:
-          </p>
-          <div style="margin: 28px 0;">
-            <a href="${resetUrl}" style="background-color: #2563eb; color: #ffffff; padding: 12px 28px; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 15px; display: inline-block;">Reset Password</a>
-          </div>
-          <p style="margin: 0 0 12px 0; font-size: 13px; color: #64748b; line-height: 1.5;">
-            This link will expire in <strong>${passwordResetExpiryMinutes} minutes</strong>. If the button does not work, copy and paste this link into your browser:
-          </p>
-          <p style="margin: 0 0 24px 0; word-break: break-all; font-size: 13px; color: #2563eb;">
-            <a href="${resetUrl}" style="color: #2563eb;">${resetUrl}</a>
-          </p>
-          <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;" />
-          <p style="margin: 0; font-size: 12px; color: #94a3b8;">
-            If you did not request this password reset, no action is needed. Your account remains secure.
-          </p>
+  return sendAppEmail({
+    to: email,
+    subject: 'Reset your BugTrack Pro password',
+    text: `You recently requested to reset your password for BugTrack Pro.\n\nUse this link to reset your password (expires in ${passwordResetExpiryMinutes} minutes):\n${resetUrl}\n\nIf you did not request a password reset, you can safely ignore this email. Your password will not change.`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 560px; margin: 0 auto; padding: 32px 24px; background-color: #ffffff; color: #1e293b; border: 1px solid #e2e8f0; border-radius: 8px;">
+        <div style="margin-bottom: 24px;">
+          <h2 style="margin: 0; color: #0f172a; font-size: 22px; font-weight: 700;">BugTrack <span style="color: #2563eb;">Pro</span></h2>
+          <p style="margin: 4px 0 0 0; color: #64748b; font-size: 14px;">Software Testing &amp; Bug Management</p>
         </div>
-      `,
-    });
-    if (info && (info.messageId || info.accepted?.length > 0)) {
-      console.log(`[EMAIL] Password reset email confirmed by SMTP for ${maskEmail(email)} (MessageID: ${info?.messageId || 'sent'})`);
-      return info;
-    }
-    throw new Error('SMTP transport did not confirm message acceptance.');
-  } catch (error) {
-    if (error.code === 'ETIMEDOUT' || error.message?.includes('timed out')) {
-      console.error(`[EMAIL] SMTP connection timed out for ${maskEmail(email)}. Note: On Render free tier, outbound SMTP ports (25, 465, 587) are blocked. Use a paid plan or set RESEND_API_KEY.`);
-      throw new SmtpDeliveryError(error, 'timeout');
-    }
-    if (error.code === 'EAUTH' || error.responseCode === 535) {
-      console.error(`[EMAIL] SMTP authentication failed for ${config.user}. Verify your Google App Password / SMTP credentials.`);
-      throw new SmtpDeliveryError(error, 'auth');
-    }
-    console.error(`[EMAIL] Failed to send password reset email to ${maskEmail(email)}: [${error.code || 'UNKNOWN'}] ${error.message}`);
-    throw new SmtpDeliveryError(error, 'delivery');
-  }
+        <h3 style="margin: 0 0 16px 0; color: #1e293b; font-size: 18px;">Reset your password</h3>
+        <p style="margin: 0 0 20px 0; font-size: 15px; line-height: 1.5; color: #334155;">
+          We received a request to reset the password for your BugTrack Pro account (<strong>${maskEmail(email)}</strong>). Click the button below to set a new password:
+        </p>
+        <div style="margin: 28px 0;">
+          <a href="${resetUrl}" style="background-color: #2563eb; color: #ffffff; padding: 12px 28px; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 15px; display: inline-block;">Reset Password</a>
+        </div>
+        <p style="margin: 0 0 12px 0; font-size: 13px; color: #64748b; line-height: 1.5;">
+          This link will expire in <strong>${passwordResetExpiryMinutes} minutes</strong>. If the button does not work, copy and paste this link into your browser:
+        </p>
+        <p style="margin: 0 0 24px 0; word-break: break-all; font-size: 13px; color: #2563eb;">
+          <a href="${resetUrl}" style="color: #2563eb;">${resetUrl}</a>
+        </p>
+        <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;" />
+        <p style="margin: 0; font-size: 12px; color: #94a3b8;">
+          If you did not request this password reset, no action is needed. Your account remains secure.
+        </p>
+      </div>
+    `,
+  });
 };
 if (db.data.bugs.some((bug) => bug.is_demo) || db.data.test_cases.some((testCase) => testCase.is_demo)) {
   db.data.bugs = db.data.bugs.filter((bug) => !bug.is_demo);
@@ -886,6 +921,13 @@ app.post('/api/settings/profile/request-email-change', requireAuth, async (req, 
     await sendVerificationEmail(cleanEmail, code);
   } catch (err) {
     console.warn('[EMAIL] Verification email notice during change:', err.message);
+    if (process.env.NODE_ENV === 'production' || process.env.RENDER === 'true') {
+      delete user.pending_email;
+      delete user.pending_email_code_hash;
+      delete user.pending_email_expires_at;
+      await save();
+      return res.status(503).json({ error: 'Unable to deliver verification code. Please check mail service configuration or try again later.' });
+    }
   }
 
   res.json({
@@ -1681,26 +1723,37 @@ const registerHandler = async (req, res) => {
     return res.status(202).json({ verificationRequired: true, email: user.email, maskedEmail: maskEmail(user.email), expiresAt: user.verificationExpiresAt });
   } catch (error) {
     console.error('[AUTH] Verification email delivery notice:', error.code || error.message);
-    // Auto-verify user so registration succeeds even if cloud email delivery is restricted
-    user.emailVerified = true;
-    delete user.verificationCodeHash;
-    delete user.verificationExpiresAt;
+    const allowAutoVerify = String(process.env.AUTO_VERIFY_IF_NO_SMTP || '').toLowerCase() === 'true';
+    if (allowAutoVerify) {
+      user.emailVerified = true;
+      delete user.verificationCodeHash;
+      delete user.verificationExpiresAt;
+      await save();
+      await syncProfileToSupabase(user);
+      const sessionToken = signSession(user.id);
+      const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https' || process.env.NODE_ENV === 'production';
+      const sameSite = isSecure ? 'None' : 'Lax';
+      const secureFlag = isSecure ? '; Secure' : '';
+      res.setHeader('Set-Cookie', `bugtrack_session=${encodeURIComponent(sessionToken)}; HttpOnly; SameSite=${sameSite}; Path=/; Max-Age=${sessionLifetimeSeconds}${secureFlag}`);
+      console.log(`[AUTH] Auto-verified new registration (AUTO_VERIFY_IF_NO_SMTP fallback): ${maskEmail(user.email)} [${user.role}]`);
+      return res.status(201).json({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        verificationRequired: false,
+        token: sessionToken,
+        notice: 'Account created and verified successfully.'
+      });
+    }
+    // If auto-verify is disabled, do not create an unverified account that cannot receive codes
+    db.data.users = db.data.users.filter(u => u.id !== user.id);
     await save();
-    await syncProfileToSupabase(user);
-    const sessionToken = signSession(user.id);
-    const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https' || process.env.NODE_ENV === 'production';
-    const sameSite = isSecure ? 'None' : 'Lax';
-    const secureFlag = isSecure ? '; Secure' : '';
-    res.setHeader('Set-Cookie', `bugtrack_session=${encodeURIComponent(sessionToken)}; HttpOnly; SameSite=${sameSite}; Path=/; Max-Age=${sessionLifetimeSeconds}${secureFlag}`);
-    console.log(`[AUTH] Auto-verified new registration (email delivery notice): ${maskEmail(user.email)} [${user.role}]`);
-    return res.status(201).json({
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      verificationRequired: false,
-      token: sessionToken,
-      notice: 'Account created and verified successfully.'
+    if (supabase) {
+      try { await supabase.from('profiles').delete().eq('id', user.id); } catch {}
+    }
+    return res.status(503).json({
+      error: 'Unable to deliver verification email at this time. Please check mail service configuration or try again later.'
     });
   }
 };
