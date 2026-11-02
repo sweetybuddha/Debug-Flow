@@ -7865,63 +7865,6 @@
       "updated_at": "2026-10-27T05:13:44.391Z",
       "analysis_id": "bdc218ecd6b4439491d99599cb8a2447",
       "related_bug_id": 9
-    },
-    {
-      "id": 10,
-      "steps": "Call the affected operation with divisor 0.",
-      "title": "Reject a zero divisor",
-      "actual": "",
-      "module": "main.py",
-      "status": "Not Run",
-      "is_demo": 0,
-      "user_id": null,
-      "assignee": "",
-      "case_key": "TC-2025",
-      "expected": "The operation rejects the input without an unhandled exception.",
-      "priority": "P1",
-      "objective": "Possible division by zero",
-      "created_at": "2026-10-27T05:13:44.391Z",
-      "updated_at": "2026-10-27T05:13:44.391Z",
-      "analysis_id": "bdc218ecd6b4439491d99599cb8a2447",
-      "related_bug_id": 9
-    },
-    {
-      "id": 11,
-      "steps": "Call the affected operation with a positive divisor.",
-      "title": "Accept a positive divisor",
-      "actual": "",
-      "module": "main.py",
-      "status": "Not Run",
-      "is_demo": 0,
-      "user_id": null,
-      "assignee": "",
-      "case_key": "TC-2026",
-      "expected": "The operation returns the expected result.",
-      "priority": "P1",
-      "objective": "Possible division by zero",
-      "created_at": "2026-10-27T05:13:44.391Z",
-      "updated_at": "2026-10-27T05:13:44.391Z",
-      "analysis_id": "bdc218ecd6b4439491d99599cb8a2447",
-      "related_bug_id": 9
-    },
-    {
-      "id": 12,
-      "steps": "Call the affected operation with a negative divisor.",
-      "title": "Accept a negative divisor",
-      "actual": "",
-      "module": "main.py",
-      "status": "Not Run",
-      "is_demo": 0,
-      "user_id": null,
-      "assignee": "",
-      "case_key": "TC-2027",
-      "expected": "The operation returns the expected result.",
-      "priority": "P1",
-      "objective": "Possible division by zero",
-      "created_at": "2026-10-27T05:13:44.391Z",
-      "updated_at": "2026-10-27T05:13:44.391Z",
-      "analysis_id": "bdc218ecd6b4439491d99599cb8a2447",
-      "related_bug_id": 9
     }
   ],
   "nextBug": 1130,
@@ -7940,11 +7883,11 @@
       "avatar_url": null,
       "sessions": [
         {
-          "id": "sess_1793344127240_04b10008",
+          "id": "sess_1793351324108_6b84a46e",
           "device": "Desktop Browser",
           "ip": "::ffff:127.0.0.1",
-          "created_at": "2026-10-30T07:08:47.241Z",
-          "last_active": "2026-10-30T07:08:47.241Z",
+          "created_at": "2026-10-30T09:08:44.108Z",
+          "last_active": "2026-10-30T09:08:44.108Z",
           "is_current": true
         }
       ],
@@ -7957,22 +7900,22 @@
       },
       "two_factor": {
         "enabled": true,
-        "secret": "BTP-AUTH-CF581627",
+        "secret": "BTP-AUTH-5F225A56",
         "backup_codes": [
-          "9234-80E3",
-          "5C41-C7CB",
-          "D83A-997A",
-          "C8B6-8450"
+          "3B83-AEE8",
+          "3DCA-23FA",
+          "3FCD-3C9D",
+          "05CD-4108"
         ],
-        "enabled_at": "2026-10-30T07:08:47.870Z"
+        "enabled_at": "2026-10-30T09:08:44.804Z"
       },
-      "sessions_valid_after": 1793344128108,
+      "sessions_valid_after": 1793351325079,
       "appearance": {
         "mode": "dark",
         "theme": "emerald",
         "density": "compact"
       },
-      "api_key": "btp_live_55d9cc22ff4bfeb702e55d0c41699cb5"
+      "api_key": "btp_live_3f1674141d22536e7b87b9764411737d"
     },
     {
       "name": "Alex Morgan",
@@ -8013,24 +7956,16 @@
       "passwordHash": "scrypt$+ulGbqD/oidbMe1ISocQmA==$+VCieagJZtau0aIzIAEodMYflZgspw3RB1Ah+C1zOmvA4EFDa9SESWxi9CVP4COkcvQYgQ9rqb139giFOKHxsA==",
       "emailVerified": true,
       "id": "usr_9173d09e-254c-43c4-bdd5-9675a4910d60",
-      "passwordResetTokenHash": "e6b1f3750e3b9289dd4bfe461e7442feb9175a265463153cf42e61fc52d3ab92",
-      "passwordResetExpiresAt": 1793349978201,
+      "passwordResetTokenHash": "d4571e46b05afea6f3c4dd39dfcd09c08ff0df4f8ff6b4db06201d271cbd1cd8",
+      "passwordResetExpiresAt": 1793608282538,
       "sessions": [
         {
-          "id": "sess_1793362300144_aed1ef47",
+          "id": "sess_1793600229815_5cb45309",
           "device": "Windows Chrome",
           "ip": "::ffff:127.0.0.1",
-          "created_at": "2026-10-30T12:11:40.144Z",
-          "last_active": "2026-10-30T12:11:40.144Z",
+          "created_at": "2026-11-02T06:17:09.815Z",
+          "last_active": "2026-11-02T06:17:09.815Z",
           "is_current": true
-        },
-        {
-          "id": "sess_1793361382587_7c29371f",
-          "device": "Windows Chrome",
-          "ip": "::ffff:127.0.0.1",
-          "created_at": "2026-10-30T11:56:22.591Z",
-          "last_active": "2026-10-30T11:56:22.591Z",
-          "is_current": false
         },
         {
           "id": "sess_1793348150079_204fef4b",
@@ -9290,19 +9225,107 @@
     },
     {
       "id": 123,
-      "user_id": "usr_9173d09e-254c-43c4-bdd5-9675a4910d60",
+      "user_id": "usr_fa56daa1-6934-4fcd-bd2c-cb345ef2bd82",
       "type": "login",
-      "message": "Signed in successfully from Windows Chrome (::ffff:127.0.0.1)",
-      "actor": "monica",
-      "created_at": "2026-10-30T11:56:22.592Z"
+      "message": "Signed in successfully from Desktop Browser (::ffff:127.0.0.1)",
+      "actor": "Maya Chen",
+      "created_at": "2026-10-30T09:08:44.108Z"
     },
     {
       "id": 124,
+      "user_id": "usr_fa56daa1-6934-4fcd-bd2c-cb345ef2bd82",
+      "type": "profile_update",
+      "message": "Updated profile details (Maya Chen)",
+      "actor": "Maya Chen",
+      "created_at": "2026-10-30T09:08:44.273Z"
+    },
+    {
+      "id": 125,
+      "user_id": "usr_fa56daa1-6934-4fcd-bd2c-cb345ef2bd82",
+      "type": "settings_update",
+      "message": "Updated notification preferences",
+      "actor": "Maya Chen",
+      "created_at": "2026-10-30T09:08:44.570Z"
+    },
+    {
+      "id": 126,
+      "user_id": "usr_fa56daa1-6934-4fcd-bd2c-cb345ef2bd82",
+      "type": "security_update",
+      "message": "Enabled two-factor authentication",
+      "actor": "Maya Chen",
+      "created_at": "2026-10-30T09:08:44.804Z"
+    },
+    {
+      "id": 127,
+      "user_id": "usr_fa56daa1-6934-4fcd-bd2c-cb345ef2bd82",
+      "type": "session_revoked",
+      "message": "Revoked all other active sessions",
+      "actor": "Maya Chen",
+      "created_at": "2026-10-30T09:08:45.079Z"
+    },
+    {
+      "id": 128,
+      "user_id": "usr_fa56daa1-6934-4fcd-bd2c-cb345ef2bd82",
+      "type": "workspace_update",
+      "message": "Updated workspace configuration (Acme QA Workspace)",
+      "actor": "Maya Chen",
+      "created_at": "2026-10-30T09:08:45.350Z"
+    },
+    {
+      "id": 129,
+      "user_id": "usr_fa56daa1-6934-4fcd-bd2c-cb345ef2bd82",
+      "type": "member_invite",
+      "message": "Invited New QA Tester (qa.invite.1793351325466@acme.test) as Tester",
+      "actor": "Maya Chen",
+      "created_at": "2026-10-30T09:08:45.507Z"
+    },
+    {
+      "id": 130,
+      "user_id": "usr_fa56daa1-6934-4fcd-bd2c-cb345ef2bd82",
+      "type": "member_role_update",
+      "message": "Changed New QA Tester's role from Tester to Developer",
+      "actor": "Maya Chen",
+      "created_at": "2026-10-30T09:08:45.745Z"
+    },
+    {
+      "id": 131,
+      "user_id": "usr_fa56daa1-6934-4fcd-bd2c-cb345ef2bd82",
+      "type": "member_removed",
+      "message": "Removed New QA Tester (qa.invite.1793351325466@acme.test) from workspace",
+      "actor": "Maya Chen",
+      "created_at": "2026-10-30T09:08:45.934Z"
+    },
+    {
+      "id": 132,
+      "user_id": "usr_fa56daa1-6934-4fcd-bd2c-cb345ef2bd82",
+      "type": "integration_update",
+      "message": "Generated new BugTrack Pro API Key",
+      "actor": "Maya Chen",
+      "created_at": "2026-10-30T09:08:46.533Z"
+    },
+    {
+      "id": 133,
+      "user_id": "usr_fa56daa1-6934-4fcd-bd2c-cb345ef2bd82",
+      "type": "profile_update",
+      "message": "Updated profile details (Maya Chen)",
+      "actor": "Maya Chen",
+      "created_at": "2026-10-30T09:08:46.702Z"
+    },
+    {
+      "id": 134,
+      "user_id": "usr_fa56daa1-6934-4fcd-bd2c-cb345ef2bd82",
+      "type": "workspace_update",
+      "message": "Updated workspace configuration (Acme QA Workspace)",
+      "actor": "Maya Chen",
+      "created_at": "2026-10-30T09:08:46.971Z"
+    },
+    {
+      "id": 135,
       "user_id": "usr_9173d09e-254c-43c4-bdd5-9675a4910d60",
       "type": "login",
       "message": "Signed in successfully from Windows Chrome (::ffff:127.0.0.1)",
       "actor": "monica",
-      "created_at": "2026-10-30T12:11:40.144Z"
+      "created_at": "2026-11-02T06:17:09.815Z"
     }
   ],
   "analyses": [
