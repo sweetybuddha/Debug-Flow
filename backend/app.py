@@ -19,7 +19,8 @@ from werkzeug.utils import secure_filename
 
 ROOT = Path(__file__).resolve().parent
 default_data_dir = ROOT / "data"
-DATA = Path(os.environ.get("ANALYZER_DATA_DIR") or str(default_data_dir))
+default_runtime_data_dir = Path("/tmp/bugtrack-analyzer") if os.environ.get("VERCEL") == "1" else default_data_dir
+DATA = Path(os.environ.get("ANALYZER_DATA_DIR") or str(default_runtime_data_dir))
 UPLOADS = DATA / "uploads"
 WORKSPACES = DATA / "workspaces"
 DATABASE = DATA / "analyzer.sqlite3"

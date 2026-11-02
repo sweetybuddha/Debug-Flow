@@ -150,14 +150,17 @@ const deleteTestCaseFromSupabase = async (caseId) => {
 };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const runtimeDataDir = process.env.DATA_DIR || __dirname;
+const runtimeDataDir = process.env.DATA_DIR || (process.env.VERCEL === '1' ? os.tmpdir() : __dirname);
 fs.mkdirSync(runtimeDataDir, { recursive: true });
 const app = express();
 app.set('trust proxy', 1);
 const uploadDir = path.join(runtimeDataDir, 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
 const upload = multer({ dest: uploadDir, limits: { fileSize: 5 * 1024 * 1024 } });
-const analyzerUrl = process.env.ANALYZER_URL || 'http://127.0.0.1:5000';
+const analyzerUrl = process.env.ANALYZER_URL
+  || (process.env.VERCEL === '1' && process.env.VERCEL_URL
+    ? `https://${process.env.VERCEL_URL}/api/analyzer-service`
+    : 'http://127.0.0.1:5000');
 const analyzerEndpoint = (pathName) => new URL(pathName.replace(/^\/+/, ''), `${analyzerUrl.replace(/\/+$/, '')}/`).toString();
 const trustedOrigins = new Set((process.env.CORS_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5174,http://127.0.0.1:5174')
   .split(',').map(origin => origin.trim()).filter(Boolean));
@@ -3069,6 +3072,8 @@ app.use((err, req, res, next) => {
 
 app.use(express.static(path.join(__dirname,'dist'))); app.get('*',(_,res)=>res.sendFile(path.join(__dirname,'dist','index.html')));
 const port = Number(process.env.PORT || 3000);
-app.listen(port, () => console.log(`BugTrack Pro API running on port ${port}`));
+if (process.env.VERCEL !== '1') {
+ app.listen(port, () => console.log(`BugTrack Pro API running on port ${port}`));
+}
 
 export default app;

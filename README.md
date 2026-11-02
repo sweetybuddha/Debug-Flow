@@ -104,57 +104,35 @@ lose uploaded files and application data.
 
 
 
+## Deploy on Vercel
+
+Vercel runs the Vite frontend and Express API through the `api/index.js`
+serverless entry point. Import the repository as a Vercel project and use the
+settings from `vercel.json`:
+
+- **Build command:** `npm run build`
+- **Output directory:** `dist`
+- **Install command:** `npm ci`
+
+The Flask analyzer is deployed in the same Vercel project as the Python
+function `api/analyzer.py`. The Express API forwards analyzer requests through
+the internal `/api/analyzer-service/*` route. Set `ANALYZER_URL` only when
+using a separately hosted analyzer; otherwise Vercel uses its own deployment
+URL automatically.
+
+Set `APP_URL`, `FRONTEND_URL`, and `CORS_ORIGINS` to the Vercel deployment URL.
+Set Supabase, email, LLM, and session secrets in Vercel's Environment
+settings; never commit `.env` or copy real credentials into source files.
+
+Vercel function storage is temporary. The local JSON database, SQLite analyzer
+database, uploads, and workspaces are not durable. Use Supabase and object
+storage before relying on this deployment for production data. Set
+`ANALYZER_DATA_DIR=/tmp/bugtrack-analyzer` if you want to make the analyzer's
+temporary storage location explicit.
+
 ## Run Analyzer Tests
 
-
-
 Run analyzer tests with pytest:
-
-
-
-- `app` serves the Vite frontend.
-
-- `api` serves the Express application at `/api/*`.
-
-- `analyzer` runs the Flask analyzer internally.
-
-
-
-The Flask service uses `app.py` as its entrypoint (along with `backend/pyproject.toml`)
-
-so Vercel can start the Flask application correctly.
-
-
-
-The API service uses `api/index.js` as its entrypoint with the `express` framework preset.
-
-
-
-The `api` service receives the analyzer's internal URL through the
-
-`ANALYZER_URL` service binding. Do not set `ANALYZER_URL` manually in Vercel.
-
-Import the repository as a Vercel project and deploy with the defaults from
-
-`vercel.json`. Add the environment variables from `.env` in the Vercel project
-
-settings, along with `APP_URL` set to the deployed domain and
-
-`CORS_ORIGINS` set to that same domain.
-
-
-
-Vercel functions have temporary filesystems. The Express and Flask services use
-
-temporary storage on Vercel so analysis requests can complete, but move
-
-`bugtrack.json`, analyzer SQLite data, and uploads to durable managed storage
-
-before using this deployment for production data.
-
-
-
-Run analyzer tests:
 
 
 
@@ -261,4 +239,3 @@ Password reset requests use a cryptographically random, single-use token stored 
 
 
 An optional LLM provider can be configured later through environment variables in `.env.example`; secrets must remain server-side.
-
