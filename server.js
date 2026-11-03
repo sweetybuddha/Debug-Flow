@@ -261,7 +261,8 @@ const requireAuth = async (req, res, next) => {
     const authHeader = req.headers.authorization || '';
     const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
     const sessionCookie = parseCookies(req.headers.cookie).bugtrack_session || '';
-    const token = bearerToken || sessionCookie;
+    const queryToken = typeof req.query?.token === 'string' ? req.query.token.trim() : '';
+    const token = bearerToken || sessionCookie || queryToken;
     if (!token) {
       return res.status(401).json({ error: 'Authentication required. Please sign in.', code: 'SESSION_EXPIRED' });
     }
@@ -741,23 +742,18 @@ const maskEmail = (email) => {
 };
 
 const resolveResendSender = () => {
-  // 1. Explicit verified domain sender for Resend if configured
-  if (process.env.RESEND_FROM_EMAIL?.trim()) {
-    let sender = process.env.RESEND_FROM_EMAIL.trim();
-    return sender.includes('<') ? sender : `BugTrack Pro <${sender}>`;
-  }
-
-  // 2. Inspect SMTP_FROM_EMAIL / SMTP_USER
-  let configuredFrom = (process.env.SMTP_FROM_EMAIL || process.env.SMTP_EMAIL || process.env.SMTP_USER || '').trim();
+  let configuredFrom = (process.env.RESEND_FROM_EMAIL || process.env.SMTP_FROM_EMAIL || process.env.SMTP_EMAIL || process.env.SMTP_USER || '').trim();
   if (configuredFrom.endsWith('.comss')) {
     configuredFrom = configuredFrom.replace(/\.comss$/i, '.com');
   }
 
-  const domain = configuredFrom.split('@')[1]?.toLowerCase();
+  const emailMatch = configuredFrom.match(/<([^>]+)>/) || [null, configuredFrom];
+  const rawEmail = (emailMatch[1] || '').trim();
+  const domain = rawEmail.split('@')[1]?.toLowerCase();
   const publicWebmailDomains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 'live.com', 'aol.com'];
 
-  // If sender domain is an unverified public webmail domain (like gmail.com),
-  // Resend strictly requires using onboarding@resend.dev unless a custom domain is verified.
+  // If sender domain is an unverified public webmail domain (like gmail.com) or missing,
+  // Resend strictly requires using onboarding@resend.dev unless a custom verified domain is used.
   if (!domain || publicWebmailDomains.includes(domain)) {
     return 'BugTrack Pro <onboarding@resend.dev>';
   }

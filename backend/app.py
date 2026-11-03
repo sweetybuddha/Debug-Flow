@@ -42,7 +42,7 @@ for directory in (UPLOADS, WORKSPACES):
 
 
 def db():
-    connection = sqlite3.connect(DATABASE)
+    connection = sqlite3.connect(DATABASE, timeout=15.0)
     connection.row_factory = sqlite3.Row
     return connection
 
@@ -347,7 +347,7 @@ def build_input_workspace(files):
         uploaded_files.append(original)
         if destination.suffix.lower() == ".zip":
             extracted = workspace / "project"
-            extracted.mkdir()
+            extracted.mkdir(parents=True, exist_ok=True)
             with zipfile.ZipFile(destination) as archive:
                 safe_extract(archive, extracted)
             destination.unlink()
