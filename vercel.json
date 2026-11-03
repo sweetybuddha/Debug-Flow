@@ -18,7 +18,7 @@
     },
     {
       "source": "/api/analyzer-service/(.*)",
-      "destination": "/api/analyzer.py/api/analyzer/$1"
+      "destination": "/api/analyzer.py/$1"
     },
     {
       "source": "/api/(.*)",
