@@ -479,6 +479,19 @@ app.post('/api/analyzer/analyze', requireAuth, upload.any(), async (req, res) =>
   const language = req.body?.language || 'Python';
   const report = req.body?.report || '';
   const logs = req.body?.logs || '';
+  let fallbackSource = source;
+  let fallbackFilename = filename;
+  if (!fallbackSource.trim() && Array.isArray(req.files)) {
+    const uploadedSource = req.files.find(file => /\.(py|js|jsx|ts|tsx|java|html|htm|css)$/i.test(file.originalname || ''));
+    if (uploadedSource) {
+      try {
+        fallbackSource = fs.readFileSync(uploadedSource.path, 'utf8');
+        fallbackFilename = uploadedSource.originalname || fallbackFilename;
+      } catch (error) {
+        console.warn('[Analyzer fallback] Unable to read uploaded source:', error.message);
+      }
+    }
+  }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 45_000);
@@ -518,7 +531,7 @@ app.post('/api/analyzer/analyze', requireAuth, upload.any(), async (req, res) =>
     // If upstream returns 401 or 403 (e.g. Vercel deployment protection), NEVER pass 401 to browser!
     if (response.status === 401 || response.status === 403) {
       console.warn(`[Analyzer Proxy] Upstream returned ${response.status}. Using fallback static analysis to prevent session invalidation.`);
-      const fallbackResult = runFallbackStaticAnalysis(source, filename, language, report, logs);
+      const fallbackResult = runFallbackStaticAnalysis(fallbackSource, fallbackFilename, language, report, logs);
       db.data.analyses ||= [];
       db.data.analyses.push({ id: fallbackResult.id, user_id: req.user.id, created_at: new Date().toISOString() });
       await save();
@@ -538,14 +551,14 @@ app.post('/api/analyzer/analyze', requireAuth, upload.any(), async (req, res) =>
     }
 
     console.warn(`[Analyzer Proxy] Upstream returned ${response.status}. Using fallback static analysis.`);
-    const fallbackResult = runFallbackStaticAnalysis(source, filename, language, report, logs);
+    const fallbackResult = runFallbackStaticAnalysis(fallbackSource, fallbackFilename, language, report, logs);
     db.data.analyses ||= [];
     db.data.analyses.push({ id: fallbackResult.id, user_id: req.user.id, created_at: new Date().toISOString() });
     await save();
     return res.json(fallbackResult);
   } catch (error) {
     console.warn('[Analyzer Service Error - running fallback analysis]:', error.code || error.message);
-    const fallbackResult = runFallbackStaticAnalysis(source, filename, language, report, logs);
+    const fallbackResult = runFallbackStaticAnalysis(fallbackSource, fallbackFilename, language, report, logs);
     if (fallbackResult.id && db?.data) {
       db.data.analyses ||= [];
       db.data.analyses.push({ id: fallbackResult.id, user_id: req.user.id, created_at: new Date().toISOString() });
