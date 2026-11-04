@@ -355,6 +355,12 @@ app.get('/api/health', healthHandler);
 const runFallbackStaticAnalysis = (source = '', filename = 'main.py', language = 'Python', report = '', logs = '') => {
   const findings = [];
   const lines = (source || '').split('\n');
+  const addFinding = (finding) => {
+    findings.push({
+      id: `finding-${findings.length + 1}`,
+      ...finding,
+    });
+  };
 
   lines.forEach((line, idx) => {
     const lineNum = idx + 1;
@@ -362,8 +368,7 @@ const runFallbackStaticAnalysis = (source = '', filename = 'main.py', language =
     if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('#') || trimmed.startsWith('/*')) return;
 
     if (/\/\s*0(?:\.0*)?(?:[^\d]|$)/.test(trimmed)) {
-      findings.push({
-        id: `finding-${findings.length + 1}`,
+      addFinding({
         title: 'Zero division error in calculation module',
         category: 'Logic',
         severity: 'Critical',
@@ -381,9 +386,8 @@ const runFallbackStaticAnalysis = (source = '', filename = 'main.py', language =
       });
     }
 
-    if (/\beval\s*\(/.test(trimmed)) {
-      findings.push({
-        id: `finding-${findings.length + 1}`,
+    if (language !== 'Python' && /\beval\s*\(/.test(trimmed)) {
+      addFinding({
         title: 'Unsafe eval in dynamic template processor',
         category: 'Security',
         severity: 'Critical',
@@ -402,8 +406,7 @@ const runFallbackStaticAnalysis = (source = '', filename = 'main.py', language =
     }
 
     if (/\.innerHTML\s*=/.test(trimmed)) {
-      findings.push({
-        id: `finding-${findings.length + 1}`,
+      addFinding({
         title: 'Unsafe innerHTML assignment vulnerability',
         category: 'Security',
         severity: 'High',
@@ -418,6 +421,63 @@ const runFallbackStaticAnalysis = (source = '', filename = 'main.py', language =
         verification: 'Confirmed',
         original_code: trimmed,
         corrected_code: trimmed.replace(/\.innerHTML\s*=/g, '.textContent =')
+      });
+    }
+
+    if (language === 'Python' && /(?:^|\b)def\s+\w+\s*\([^)]*=\s*(?:\[\]|\{\}|set\(\)|list\(\)|dict\(\))/.test(trimmed)) {
+      addFinding({
+        title: 'Mutable default argument',
+        category: 'Runtime behavior',
+        severity: 'High',
+        confidence: 0.99,
+        explanation: 'A mutable default value is created once and shared by every call to the function.',
+        evidence: trimmed,
+        expected: 'Each call receives a new collection unless shared state is intentional.',
+        actual: 'Values can leak between separate calls.',
+        recommendation: 'Use None as the default and create the collection inside the function.',
+        file: filename,
+        line: lineNum,
+        verification: 'Confirmed',
+        original_code: trimmed,
+        corrected_code: trimmed.replace(/=\s*(\[\]|\{\}|set\(\)|list\(\)|dict\(\))/, '=None')
+      });
+    }
+
+    if (language === 'Python' && /\b(?:\/|\/\/|%)\s*[A-Za-z_]\w*\b/.test(trimmed)) {
+      addFinding({
+        title: 'Possible division by zero',
+        category: 'Runtime error',
+        severity: 'Medium',
+        confidence: 0.75,
+        explanation: 'The divisor is not proven to be non-zero by static analysis.',
+        evidence: trimmed,
+        expected: 'The divisor is validated before performing the operation.',
+        actual: 'A zero divisor may raise an exception.',
+        recommendation: 'Validate the divisor before performing the operation.',
+        file: filename,
+        line: lineNum,
+        verification: 'Potential',
+        original_code: trimmed,
+        corrected_code: `if divisor == 0:\n    raise ValueError('Divisor cannot be zero')\n${trimmed}`
+      });
+    }
+
+    if (language === 'Python' && /\b(?:eval|exec)\s*\(/.test(trimmed)) {
+      addFinding({
+        title: 'Use of eval()',
+        category: 'Security / code quality',
+        severity: 'High',
+        confidence: 0.96,
+        explanation: 'Dynamic evaluation can execute unintended Python code.',
+        evidence: trimmed,
+        expected: 'Only trusted, explicitly validated operations execute.',
+        actual: 'Arbitrary expression text is evaluated.',
+        recommendation: 'Replace eval with ast.literal_eval for data-only parsing, or use explicit validation.',
+        file: filename,
+        line: lineNum,
+        verification: 'Confirmed',
+        original_code: trimmed,
+        corrected_code: trimmed.replace(/\beval\s*\(/g, 'ast.literal_eval(')
       });
     }
   });
