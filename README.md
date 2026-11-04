@@ -216,6 +216,18 @@ CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 
 For Gmail, use an App Password rather than the normal account password. `SMTP_USER` and `SMTP_FROM_EMAIL` are preferred; the legacy `SMTP_EMAIL` variable remains supported. Use `SMTP_SECURE=true` with port 465 and `SMTP_SECURE=false` with port 587. If SMTP is not configured or delivery fails, registration returns an explicit error and does not create an account. Existing demo accounts are treated as verified; new users cannot sign in until verification succeeds.
 
+For production deployments using Resend, configure the following backend-only variables:
+
+```text
+RESEND_API_KEY=re_...
+RESEND_FROM_EMAIL=BugTrack Pro <support@your-verified-domain.example>
+APP_URL=https://your-frontend.example
+FRONTEND_URL=https://your-frontend.example
+PASSWORD_RESET_EXPIRY_MINUTES=20
+```
+
+The sender domain must be verified in Resend. The API records a reset as accepted only after Resend returns a message ID, logs only a masked recipient, and performs a provider status lookup so bounced or suppressed addresses are visible in server logs. Never put `RESEND_API_KEY` in frontend/Vite variables or commit it to source control.
+
 
 
 ## User data isolation
@@ -226,7 +238,7 @@ Each user receives a stable unique ID at registration (and existing users are mi
 
 
 
-Password reset requests use a cryptographically random, single-use token stored only as a hash in `bugtrack.json`. Tokens expire after the configured 15-30 minute window and reset requests are rate limited. Set `APP_URL` to the public frontend URL so reset emails point to the deployed application. Reset requests return the same confirmation for registered and unregistered addresses.
+Password reset requests use a cryptographically random, single-use token stored only as a hash on the matching user record. Tokens expire after the configured `PASSWORD_RESET_EXPIRY_MINUTES` window and reset requests are rate limited. Only verified accounts can request a password reset. Set `APP_URL` or `FRONTEND_URL` to the public frontend URL so reset emails point to the deployed application. Reset requests return the same confirmation for registered and unregistered addresses.
 
 
 

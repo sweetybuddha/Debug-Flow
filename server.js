@@ -26,9 +26,20 @@ if (supabaseUrl && supabaseKey) {
     console.warn('Failed to initialize Supabase client:', err.message);
   }
 }
+class ResendDeliveryError extends Error {
+  constructor(status, providerMessage, deliveryStatus) {
+    super(`Resend rejected the email request (${status}).`);
+    this.name = 'ResendDeliveryError';
+    this.code = `RESEND_${status}`;
+    this.stage = 'provider';
+    this.providerStatus = deliveryStatus;
+    this.providerMessage = providerMessage;
+    this.statusCode = status;
+  }
+}
 
 const syncProfileToSupabase = async (user) => {
-  if (!supabase || !user) return;
+  if (!supabase || !user) return true;
   try {
     const extra_data = {
       ...(user.extra_data || {}),
@@ -45,7 +56,7 @@ const syncProfileToSupabase = async (user) => {
       verificationLastSentAt: user.verificationLastSentAt || null,
       verificationResends: user.verificationResends || null,
     };
-    await supabase.from('profiles').upsert({
+    const { error } = await supabase.from('profiles').upsert({
       id: user.id,
       name: user.name,
       email: user.email,
@@ -55,8 +66,14 @@ const syncProfileToSupabase = async (user) => {
       created_at: user.createdAt || user.created_at || new Date().toISOString(),
       extra_data,
     }, { onConflict: 'id' });
+    if (error) {
+      console.warn('Supabase profile sync notice:', error.message);
+      return false;
+    }
+    return true;
   } catch (err) {
     console.warn('Supabase profile sync notice:', err.message);
+    return false;
   }
 };
 const syncUserToSupabase = syncProfileToSupabase;
@@ -982,6 +999,35 @@ const sendMailSafe = async (transporter, mailOptions, timeoutMs = 8000) => {
 };
 const hashOtp = (email, otp) => crypto.createHash('sha256').update(`${verificationPepper}:${email}:${otp}`).digest('hex');
 const hashResetToken = (token) => crypto.createHash('sha256').update(`${verificationPepper}:reset:${token}`).digest('hex');
+const normalizeEmail = (email) => typeof email === 'string' ? email.trim().toLowerCase() : '';
+const findLocalUserByEmail = (email) => {
+  const normalizedEmail = normalizeEmail(email);
+  return db.data.users.find((candidate) => normalizeEmail(candidate.email) === normalizedEmail);
+};
+const sanitizeProviderMessage = (message) => String(message || 'Unknown provider error')
+  .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[redacted-email]');
+const classifyResendError = (status, message) => {
+  const normalized = String(message || '').toLowerCase();
+  if (normalized.includes('suppressed') || normalized.includes('suppression')) return 'suppressed';
+  if (normalized.includes('bounce') || normalized.includes('bounced')) return 'bounced';
+  return status >= 500 ? 'provider_error' : 'rejected';
+};
+const inspectResendDelivery = async (messageId, to, apiKey) => {
+  try {
+    const response = await fetch(`https://api.resend.com/emails/${encodeURIComponent(messageId)}`, {
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+    });
+    const details = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      console.warn(`[EMAIL] Resend delivery status lookup failed for ${maskEmail(to)} (http=${response.status}): ${sanitizeProviderMessage(details?.message || response.statusText)}`);
+      return;
+    }
+    const status = details?.last_event || details?.status || 'accepted';
+    console.log(`[EMAIL] Resend delivery status for ${maskEmail(to)} (MessageID: ${messageId}, status=${status})`);
+  } catch (error) {
+    console.warn(`[EMAIL] Resend delivery status lookup unavailable for ${maskEmail(to)}: ${error.message}`);
+  }
+};
 const passwordHash = (password) => {
   const salt = crypto.randomBytes(16);
   const derived = crypto.scryptSync(password, salt, 64);
@@ -1075,8 +1121,9 @@ const sendAppEmail = async ({ to, subject, text, html, replyTo }) => {
         if (!resData?.id) {
           throw new Error('Resend API returned HTTP 200/201 but omitted message ID.');
         }
-        console.log(`[EMAIL] Email delivered successfully via Resend to ${maskEmail(to)} (MessageID: ${resData.id})`);
-        return { messageId: resData.id, provider: 'resend' };
+        console.log(`[EMAIL] Resend accepted email for ${maskEmail(to)} (MessageID: ${resData.id}, status=accepted)`);
+        await inspectResendDelivery(resData.id, to, resendApiKey);
+        return { messageId: resData.id, provider: 'resend', status: 'accepted' };
       }
 
       let errorMsg = '';
@@ -1087,11 +1134,13 @@ const sendAppEmail = async ({ to, subject, text, html, replyTo }) => {
         errorMsg = await res.text().catch(() => res.statusText);
       }
 
-      console.error(`[EMAIL] Resend API error (${res.status}) for ${maskEmail(to)}: ${errorMsg}`);
+      const safeError = sanitizeProviderMessage(errorMsg);
+      const providerStatus = classifyResendError(res.status, errorMsg);
+      console.error(`[EMAIL] Resend rejected email for ${maskEmail(to)} (status=${providerStatus}, http=${res.status}): ${safeError}`);
 
       // On Render or production, outbound SMTP ports 25, 465, 587 are blocked, so fail immediately with clear diagnostic
       if (isProduction || process.env.RENDER === 'true' || !process.env.SMTP_HOST) {
-        throw new Error(`Resend email delivery failed (${res.status}): ${errorMsg}`);
+        throw new ResendDeliveryError(res.status, safeError, providerStatus);
       }
 
       console.warn('[EMAIL] Falling back to local SMTP delivery...');
@@ -1263,12 +1312,12 @@ const loginHandler = async (req, res) => {
       return res.status(400).json({ error: 'Enter your email and password.' });
     }
     const normalizedEmail = email.trim().toLowerCase();
-    let user = db.data.users.find((candidate) => typeof candidate.email === 'string' && candidate.email.toLowerCase() === normalizedEmail);
+    let user = findLocalUserByEmail(normalizedEmail);
 
     // If user not found in local cache, unverified, or credentials mismatch, check Supabase Cloud
     if ((!user || !user.emailVerified || !passwordMatches(password, user.passwordHash)) && supabase) {
       try {
-        const { data: remoteProfile } = await supabase.from('profiles').select('*').ilike('email', normalizedEmail).maybeSingle();
+        const { data: remoteProfile } = await supabase.from('profiles').select('*').eq('email', normalizedEmail).maybeSingle();
         if (remoteProfile && remoteProfile.password_hash && passwordMatches(password, remoteProfile.password_hash)) {
           if (!user) {
             user = {
@@ -1445,7 +1494,7 @@ app.post('/api/settings/profile/request-email-change', requireAuth, async (req, 
   // Check uniqueness in Supabase if connected
   if (supabase) {
     try {
-      const { data: remoteUser } = await supabase.from('profiles').select('id').ilike('email', cleanEmail).neq('id', user.id).maybeSingle();
+      const { data: remoteUser } = await supabase.from('profiles').select('id').eq('email', cleanEmail).neq('id', user.id).maybeSingle();
       if (remoteUser) {
         return res.status(400).json({ error: 'This email address is already associated with another account.' });
       }
@@ -2069,7 +2118,7 @@ app.get('/api/settings/audit-logs/export', requireAuth, (req, res) => {
 });
 
 app.post('/api/password-reset/request', async (req, res) => {
-  const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  const email = normalizeEmail(req.body?.email);
   const genericResponse = { message: 'If an account exists for this email, password reset instructions will be sent.' };
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return res.status(400).json({ error: 'Enter a valid email address.' });
@@ -2077,6 +2126,12 @@ app.post('/api/password-reset/request', async (req, res) => {
 
   // Determine client origin URL for reset link
   const baseUrl = resolveResetBaseUrl(req);
+  if (!baseUrl || !/^https?:\/\/[^/\s]+(?:\/.*)?$/i.test(baseUrl)) {
+    console.error('[AUTH] Password reset unavailable: APP_URL or FRONTEND_URL is not a valid reset-link origin.');
+    return res.status(503).json({
+      error: 'Unable to send password reset email at this time. Please check mail service configuration or try again later.'
+    });
+  }
 
   const nowMs = Date.now();
   const requestKey = email;
@@ -2087,19 +2142,23 @@ app.post('/api/password-reset/request', async (req, res) => {
   }
   passwordResetRequests.set(requestKey, nowMs);
 
-  let user = db.data.users.find((candidate) => typeof candidate.email === 'string' && candidate.email.trim().toLowerCase() === email);
+  let user = findLocalUserByEmail(email);
   if (!user && supabase) {
     try {
-      const { data: remoteProfile } = await supabase.from('profiles').select('*').ilike('email', email).maybeSingle();
+      const { data: remoteProfile, error: profileError } = await supabase.from('profiles').select('*').eq('email', email).maybeSingle();
+      if (profileError) {
+        console.error(`[AUTH] Supabase reset lookup failed for ${maskEmail(email)}: ${sanitizeProviderMessage(profileError.message)}`);
+      }
       if (remoteProfile) {
         user = {
           id: remoteProfile.id,
           name: remoteProfile.name,
-          email: remoteProfile.email,
+          email: normalizeEmail(remoteProfile.email),
           role: remoteProfile.role,
           passwordHash: remoteProfile.password_hash,
           emailVerified: Boolean(remoteProfile.email_verified),
           createdAt: remoteProfile.created_at,
+          extra_data: remoteProfile.extra_data || {},
         };
         db.data.users.push(user);
         await save();
@@ -2113,23 +2172,38 @@ app.post('/api/password-reset/request', async (req, res) => {
     console.log(`[AUTH] Password reset requested for unregistered email: ${maskEmail(email)}`);
     return res.status(200).json(genericResponse);
   }
+  if (!user.emailVerified) {
+    console.log(`[AUTH] Password reset skipped for unverified account: ${maskEmail(email)}`);
+    return res.status(200).json(genericResponse);
+  }
 
   const token = crypto.randomBytes(32).toString('base64url');
   user.passwordResetTokenHash = hashResetToken(token);
   user.passwordResetExpiresAt = nowMs + passwordResetExpiryMinutes * 60 * 1000;
   await save();
-  await syncProfileToSupabase(user);
+  const resetStateSynced = await syncProfileToSupabase(user);
+  if (supabase && !resetStateSynced) {
+    delete user.passwordResetTokenHash;
+    delete user.passwordResetExpiresAt;
+    await save();
+    console.error(`[AUTH] Password reset unavailable: could not persist reset state for ${maskEmail(user.email)}.`);
+    return res.status(503).json({
+      error: 'Unable to send password reset email at this time. Please check mail service configuration or try again later.'
+    });
+  }
 
   try {
     const info = await sendPasswordResetEmail(user.email, token, baseUrl);
-    console.log(`[AUTH] Password reset email delivered for ${maskEmail(user.email)} (MessageID: ${info?.messageId || 'sent'})`);
+    console.log(`[AUTH] Password reset email accepted for ${maskEmail(user.email)} (provider=${info?.provider || 'unknown'}, MessageID: ${info?.messageId || 'none'}, status=${info?.status || 'accepted'})`);
     return res.status(200).json(genericResponse);
   } catch (error) {
     delete user.passwordResetTokenHash;
     delete user.passwordResetExpiresAt;
     await save();
     await syncProfileToSupabase(user);
-    console.error(`[AUTH] Password reset email delivery failed for ${maskEmail(user.email)} stage=${error.stage || 'unknown'}: [${error.code || 'FAIL'}] ${error.message}`);
+    const providerDetail = error.providerStatus ? ` providerStatus=${error.providerStatus}` : '';
+    const providerMessage = error.providerMessage ? ` detail=${sanitizeProviderMessage(error.providerMessage)}` : '';
+    console.error(`[AUTH] Password reset email delivery failed for ${maskEmail(user.email)} stage=${error.stage || 'unknown'}${providerDetail}: [${error.code || 'FAIL'}] ${error.message}${providerMessage}`);
     return res.status(503).json({
       error: 'Unable to send password reset email at this time. Please check mail service configuration or try again later.'
     });
@@ -2235,9 +2309,24 @@ const registerHandler = async (req, res) => {
     return res.status(400).json({ error: passwordError });
   }
   const normalizedEmail = email.trim().toLowerCase();
-  if (db.data.users.some((user) => user.email.toLowerCase() === normalizedEmail)) {
+  if (db.data.users.some((user) => normalizeEmail(user.email) === normalizedEmail)) {
     console.warn(`[AUTH] Registration rejected: duplicate email ${maskEmail(normalizedEmail)}`);
     return res.status(409).json({ error: 'An account with this email already exists.' });
+  }
+  if (supabase) {
+    const { data: remoteUser, error: remoteLookupError } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('email', normalizedEmail)
+      .maybeSingle();
+    if (remoteLookupError) {
+      console.error(`[AUTH] Registration email lookup failed for ${maskEmail(normalizedEmail)}: ${sanitizeProviderMessage(remoteLookupError.message)}`);
+      return res.status(503).json({ error: 'Registration is temporarily unavailable. Please try again later.' });
+    }
+    if (remoteUser) {
+      console.warn(`[AUTH] Registration rejected: duplicate email ${maskEmail(normalizedEmail)}`);
+      return res.status(409).json({ error: 'An account with this email already exists.' });
+    }
   }
 
   // Ensure role cannot be elevated to administrative roles
@@ -2306,10 +2395,10 @@ app.post('/api/auth/register', registerHandler);
 app.post('/api/verify', async (req, res) => {
   const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   const code = typeof req.body?.code === 'string' ? req.body.code.trim() : '';
-  let user = db.data.users.find((candidate) => candidate.email === email);
+  let user = findLocalUserByEmail(email);
   if (!user && supabase) {
     try {
-      const { data: remoteProfile } = await supabase.from('profiles').select('*').ilike('email', email).maybeSingle();
+      const { data: remoteProfile } = await supabase.from('profiles').select('*').eq('email', email).maybeSingle();
       if (remoteProfile) {
         user = {
           id: remoteProfile.id,
@@ -2357,10 +2446,10 @@ app.post('/api/verify', async (req, res) => {
 });
 app.post('/api/verify/resend', async (req, res) => {
   const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-  let user = db.data.users.find((candidate) => candidate.email === email);
+  let user = findLocalUserByEmail(email);
   if (!user && supabase) {
     try {
-      const { data: remoteProfile } = await supabase.from('profiles').select('*').ilike('email', email).maybeSingle();
+      const { data: remoteProfile } = await supabase.from('profiles').select('*').eq('email', email).maybeSingle();
       if (remoteProfile) {
         user = {
           id: remoteProfile.id,
