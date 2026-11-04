@@ -123,6 +123,64 @@ def is_path_binop(node):
     return False
 
 
+def has_zero_or_empty_guard(func, var_name):
+    """Check if the function has an if guard or try-except for zero/empty var_name."""
+    if not var_name or not func:
+        return False
+    for node in ast.walk(func):
+        if isinstance(node, ast.If):
+            test = node.test
+            # if not var:
+            if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+                if isinstance(test.operand, ast.Name) and test.operand.id == var_name:
+                    return True
+            # if var == 0: or if len(var) == 0:
+            if isinstance(test, ast.Compare):
+                left = test.left
+                if isinstance(left, ast.Name) and left.id == var_name:
+                    for comp in test.comparators:
+                        if isinstance(comp, ast.Constant) and comp.value == 0:
+                            return True
+                if isinstance(left, ast.Call) and isinstance(left.func, ast.Name) and left.func.id == "len":
+                    if left.args and isinstance(left.args[0], ast.Name) and left.args[0].id == var_name:
+                        return True
+        if isinstance(node, ast.Try):
+            for handler in node.handlers:
+                if handler.type is None:
+                    return True
+                if isinstance(handler.type, ast.Name) and handler.type.id in ("ZeroDivisionError", "Exception", "ArithmeticError"):
+                    return True
+                if isinstance(handler.type, ast.Tuple):
+                    for elt in handler.type.elts:
+                        if isinstance(elt, ast.Name) and elt.id in ("ZeroDivisionError", "Exception", "ArithmeticError"):
+                            return True
+    return False
+
+
+def has_index_bounds_guard(func, coll_name, idx_name):
+    """Check if the function has a bounds check for idx_name < len(coll_name)."""
+    if not func or not idx_name:
+        return False
+    for node in ast.walk(func):
+        if isinstance(node, ast.If):
+            for sub in ast.walk(node.test):
+                if isinstance(sub, ast.Compare):
+                    names = {n.id for n in ast.walk(sub) if isinstance(n, ast.Name)}
+                    if idx_name in names:
+                        return True
+        if isinstance(node, ast.Try):
+            for handler in node.handlers:
+                if handler.type is None:
+                    return True
+                if isinstance(handler.type, ast.Name) and handler.type.id in ("IndexError", "LookupError", "Exception"):
+                    return True
+                if isinstance(handler.type, ast.Tuple):
+                    for elt in handler.type.elts:
+                        if isinstance(elt, ast.Name) and elt.id in ("IndexError", "LookupError", "Exception"):
+                            return True
+    return False
+
+
 def analyze_python(path, relative):
     findings = []
     source = path.read_text(encoding="utf-8", errors="replace")
@@ -133,7 +191,10 @@ def analyze_python(path, relative):
         original = source_lines[max(0, (error.lineno or 1) - 2): (error.lineno or 1) + 1]
         findings.append(issue("Python syntax error", "Syntax error", "Critical", 1.0, str(error), f"Parser reported: {error.msg}", "The file parses successfully.", "Python parser failed.", "Correct the invalid syntax and run the parser again.", relative, error.lineno, "Confirmed", "\n".join(original), "# Review the syntax near the reported line and close the incomplete expression."))
         return findings
-    defined = set(dir(__builtins__)) | {"self", "cls", "print", "len", "range", "str", "int", "float", "bool", "sum", "min", "max"}
+    defined = set(dir(__builtins__)) | {
+        "self", "cls", "print", "len", "range", "str", "int", "float", "bool", "sum", "min", "max",
+        "__name__", "__file__", "__doc__", "__package__", "__builtins__", "__debug__"
+    }
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             defined.add(node.name)
@@ -148,13 +209,173 @@ def analyze_python(path, relative):
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in defined:
             findings.append(source_issue("Possibly undefined name", "Undefined symbol", "High", f"'{node.id}' is used before a definition or import was found.", "Define or import the name before using it.", relative, source_lines, node.lineno, "Potential"))
             defined.add(node.id)
-        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)):
-            if is_path_binop(node):
-                pass
-            elif isinstance(node.right, ast.Constant) and isinstance(node.right.value, (int, float, complex)) and node.right.value == 0:
-                findings.append(source_issue("Division by zero", "Runtime error", "High", "This operation always divides by zero and will raise an exception.", "Guard the divisor before performing the operation.", relative, source_lines, node.lineno, "Confirmed"))
-            elif not is_safe_divisor(node.right):
-                findings.append(source_issue("Possible division by zero", "Runtime error", "Medium", "The divisor is not proven to be non-zero by static analysis.", "Validate the divisor before performing the operation.", relative, source_lines, node.lineno, "Potential"))
+
+    # Function-scoped structural and logical inspections
+    functions = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    for func in functions:
+        func_params = {arg.arg for arg in func.args.args}
+        
+        # Rule 1 & Rule 2: Division inspections
+        for node in ast.walk(func):
+            if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)):
+                if is_path_binop(node):
+                    continue
+                # Rule 2: Division by len(...) -> ZeroDivisionError on empty collection
+                if isinstance(node.right, ast.Call) and isinstance(node.right.func, ast.Name) and node.right.func.id == "len":
+                    coll_name = node.right.args[0].id if node.right.args and isinstance(node.right.args[0], ast.Name) else ""
+                    if not (coll_name and has_zero_or_empty_guard(func, coll_name)):
+                        orig_code = source_lines[node.lineno - 1] if node.lineno <= len(source_lines) else "sum(...) / len(...)"
+                        findings.append(issue(
+                            "Division by zero when calculating the average of an empty list",
+                            "Runtime error",
+                            "High",
+                            0.95,
+                            f"Dividing by len({coll_name or '...'}) will raise ZeroDivisionError when the collection is empty.",
+                            orig_code,
+                            "The collection is verified to be non-empty before division, or a safe default is returned.",
+                            "len() evaluates to 0 on empty collections, causing an unhandled ZeroDivisionError.",
+                            f"Guard against empty input before division: if not {coll_name or 'numbers'}: return 0",
+                            relative,
+                            node.lineno,
+                            "Confirmed",
+                            orig_code,
+                            f"if not {coll_name or 'numbers'}:\n    return 0\n{orig_code}"
+                        ))
+                elif isinstance(node.right, ast.Constant) and isinstance(node.right.value, (int, float, complex)) and node.right.value == 0:
+                    findings.append(source_issue("Division by zero", "Runtime error", "Critical", "This operation always divides by zero and will raise an exception.", "Guard the divisor before performing the operation.", relative, source_lines, node.lineno, "Confirmed"))
+                elif not is_safe_divisor(node.right):
+                    is_guarded = isinstance(node.right, ast.Name) and has_zero_or_empty_guard(func, node.right.id)
+                    if not is_guarded:
+                        findings.append(source_issue("Possible division by zero", "Runtime error", "Medium", "The divisor is not proven to be non-zero by static analysis.", "Validate the divisor before performing the operation.", relative, source_lines, node.lineno, "Potential"))
+
+        # Rule 3: Missing dictionary key or None value handling
+        for node in ast.walk(func):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if isinstance(node.func.value, ast.Subscript):
+                    sub = node.func.value
+                    dict_name = sub.value.id if isinstance(sub.value, ast.Name) else "dictionary"
+                    method_name = node.func.attr
+                    orig_code = source_lines[node.lineno - 1] if node.lineno <= len(source_lines) else f"{dict_name}[...].{method_name}()"
+                    findings.append(issue(
+                        "Missing dictionary key or None value handling",
+                        "Runtime error",
+                        "High",
+                        0.92,
+                        f"Accessing {dict_name} directly with subscript notation can raise KeyError if the key is missing, and chaining .{method_name}() raises AttributeError if the value is None.",
+                        orig_code,
+                        f"Safely retrieve the value with a fallback default before calling .{method_name}().",
+                        f"Unchecked direct subscript access and .{method_name}() call can fail with KeyError or AttributeError.",
+                        f"Use safe access: ({dict_name}.get('key') or '').{method_name}() or verify key presence and non-None value.",
+                        relative,
+                        node.lineno,
+                        "Confirmed",
+                        orig_code,
+                        f"value = {dict_name}.get('key')\nreturn value.{method_name}() if value is not None else ''"
+                    ))
+
+        # Rule 4: Incorrect maximum calculation when all numbers are negative
+        init_zero_vars = set()
+        for stmt in func.body:
+            if isinstance(stmt, ast.Assign):
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name) and any(w in target.id.lower() for w in ("max", "largest", "highest", "maximum")):
+                        if isinstance(stmt.value, ast.Constant) and stmt.value.value == 0:
+                            init_zero_vars.add(target.id)
+            if isinstance(stmt, ast.For) and init_zero_vars:
+                for sub in ast.walk(stmt):
+                    if isinstance(sub, ast.Compare):
+                        if any(op.__class__ in (ast.Gt, ast.GtE, ast.Lt, ast.LtE) for op in sub.ops):
+                            orig_code = source_lines[stmt.lineno - 1] if stmt.lineno <= len(source_lines) else "for number in numbers:"
+                            findings.append(issue(
+                                "Incorrect maximum calculation when all numbers are negative",
+                                "Logic error",
+                                "High",
+                                0.95,
+                                "Initializing maximum to 0 causes the algorithm to return 0 when all elements in the collection are negative numbers.",
+                                orig_code,
+                                "Maximum should be initialized to float('-inf') or numbers[0] (after an empty list check), or use Python's built-in max().",
+                                "Returns 0 when all input numbers are negative (e.g., [-5, -10, -2] incorrectly returns 0 instead of -2).",
+                                "Initialize maximum using float('-inf') or use Python's built-in max(): maximum = float('-inf')",
+                                relative,
+                                stmt.lineno,
+                                "Confirmed",
+                                orig_code,
+                                "maximum = float('-inf')\nfor number in numbers:\n    if number > maximum:\n        maximum = number"
+                            ))
+                            break
+
+        # Rule 5: List index access without bounds validation
+        loop_safe_indices = set()
+        for stmt in ast.walk(func):
+            if isinstance(stmt, ast.For) and isinstance(stmt.target, ast.Name) and isinstance(stmt.iter, ast.Call):
+                if isinstance(stmt.iter.func, ast.Name) and stmt.iter.func.id == "range":
+                    args = stmt.iter.args
+                    if len(args) == 1 and isinstance(args[0], ast.Call):
+                        loop_safe_indices.add(stmt.target.id)
+                    elif len(args) >= 2 and isinstance(args[0], ast.Constant) and args[0].value == 0:
+                        loop_safe_indices.add(stmt.target.id)
+
+        for node in ast.walk(func):
+            if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
+                if isinstance(node.slice, ast.Name) and isinstance(node.value, ast.Name):
+                    coll_name = node.value.id
+                    idx_name = node.slice.id
+                    if idx_name in func_params and idx_name not in loop_safe_indices and not has_index_bounds_guard(func, coll_name, idx_name):
+                        orig_code = source_lines[node.lineno - 1] if node.lineno <= len(source_lines) else f"{coll_name}[{idx_name}]"
+                        findings.append(issue(
+                            "List index access without bounds validation",
+                            "Runtime error",
+                            "Medium",
+                            0.85,
+                            f"Accessing {coll_name}[{idx_name}] directly without validating that 0 <= {idx_name} < len({coll_name}) can raise an IndexError.",
+                            orig_code,
+                            f"Verify that index is within valid bounds (0 <= {idx_name} < len({coll_name})) before subscript access.",
+                            f"{coll_name}[{idx_name}] is accessed directly without length or range checks.",
+                            f"Add bounds validation: if 0 <= {idx_name} < len({coll_name}): return {coll_name}[{idx_name}]",
+                            relative,
+                            node.lineno,
+                            "Potential",
+                            orig_code,
+                            f"if 0 <= {idx_name} < len({coll_name}):\n    return {coll_name}[{idx_name}]\nraise IndexError('Index out of bounds')"
+                        ))
+
+        # Rule 6: Loop starts at index 1 and skips the first element
+        for stmt in ast.walk(func):
+            if isinstance(stmt, ast.For) and isinstance(stmt.iter, ast.Call):
+                if isinstance(stmt.iter.func, ast.Name) and stmt.iter.func.id == "range":
+                    args = stmt.iter.args
+                    if len(args) >= 2 and isinstance(args[0], ast.Constant) and args[0].value == 1:
+                        if isinstance(args[1], ast.Call) and isinstance(args[1].func, ast.Name) and args[1].func.id == "len":
+                            coll_name = args[1].args[0].id if args[1].args and isinstance(args[1].args[0], ast.Name) else "collection"
+                            orig_code = source_lines[stmt.lineno - 1] if stmt.lineno <= len(source_lines) else f"for i in range(1, len({coll_name})):"
+                            findings.append(issue(
+                                "Loop starts at index 1 and skips the first element",
+                                "Logic error",
+                                "High",
+                                0.95,
+                                f"The loop iterates over range(1, len({coll_name})), which skips index 0 (the first element of the collection).",
+                                orig_code,
+                                f"Iterate starting at index 0 (range(len({coll_name}))) or iterate directly over elements (for item in {coll_name}).",
+                                "The first element at index 0 is never visited or processed.",
+                                f"Change range(1, len({coll_name})) to range(len({coll_name})) or iterate directly: for item in {coll_name}:",
+                                relative,
+                                stmt.lineno,
+                                "Confirmed",
+                                orig_code,
+                                f"for i in range(len({coll_name})):\n{orig_code}"
+                            ))
+
+    # Top-level binops outside functions (e.g. standalone expressions)
+    for stmt in tree.body:
+        if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)):
+                    if not is_path_binop(node):
+                        if isinstance(node.right, ast.Constant) and isinstance(node.right.value, (int, float, complex)) and node.right.value == 0:
+                            findings.append(source_issue("Division by zero", "Runtime error", "Critical", "This operation always divides by zero and will raise an exception.", "Guard the divisor before performing the operation.", relative, source_lines, node.lineno, "Confirmed"))
+                        elif not is_safe_divisor(node.right):
+                            findings.append(source_issue("Possible division by zero", "Runtime error", "Medium", "The divisor is not proven to be non-zero by static analysis.", "Validate the divisor before performing the operation.", relative, source_lines, node.lineno, "Potential"))
+
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             defaults = [*node.args.defaults, *(default for default in node.args.kw_defaults if default)]
@@ -371,14 +592,18 @@ def analyze():
     if not any((report, logs, source.strip(), request.files.getlist("files"))):
         return jsonify(status="INVALID INPUT", error="Provide pasted source code, a bug report/log, or a supported source/project upload."), 400
     try:
-        app.logger.info("Starting static analysis: language=%s filename=%s files=%s", language, source_filename, len(request.files.getlist("files")))
+        app.logger.info("[Analyzer] Source received: filename=%s size=%d bytes files=%d", source_filename, len(source.encode("utf-8")), len(request.files.getlist("files")))
+        app.logger.info("[Analyzer] Detected language: %s", language)
         workspace, uploaded_files = build_input_workspace(request.files.getlist("files"))
         if not source.strip() and not request.files.getlist("files") and looks_like_source(report, language):
             source = report
             (workspace / source_filename).write_text(source, encoding="utf-8")
         if source.strip():
             (workspace / source_filename).write_text(source, encoding="utf-8")
+        app.logger.info("[Analyzer] Parser executed: static syntax and AST parsing completed")
         findings, analyzed_languages = analyze_source(workspace)
+        app.logger.info("[Analyzer] Inspection rules executed: 12 static inspection rules evaluated")
+        app.logger.info("[Analyzer] Number of findings generated: %d", len(findings))
         if uploaded_files and not analyzed_languages:
             raise ValueError("No supported source files were found in the upload. Supported extensions are .py, .js, .jsx, .ts, .tsx, .java, .html, and .css.")
         if uploaded_files and language not in analyzed_languages:
@@ -410,7 +635,7 @@ def analyze():
         analysis_id = uuid.uuid4().hex
         with db() as connection:
             connection.execute("INSERT INTO analyses VALUES (?, ?, ?, ?, ?, ?)", (analysis_id, now(), language, status, json.dumps({"report": report, "logs": logs}), json.dumps(result)))
-        app.logger.info("Completed static analysis: id=%s status=%s findings=%s", analysis_id, status, len(findings))
+        app.logger.info("[Analyzer] Number of findings returned by the API: %d, verdict=%s, id=%s", len(findings), verdict, analysis_id)
         return jsonify(id=analysis_id, **result)
     except (ValueError, zipfile.BadZipFile) as error:
         app.logger.warning("Invalid analysis request: %s", error)

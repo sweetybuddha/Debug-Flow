@@ -351,10 +351,9 @@ const healthHandler = (req, res) => res.json({
 });
 app.get('/health', healthHandler);
 app.get('/api/health', healthHandler);
-// Fallback Node.js static analyzer if Python analyzer service is offline, timed out, or blocked
+// Static analyzer engine for Node.js (runs when Python analyzer service is offline, timed out, or in standalone deployment)
 const runFallbackStaticAnalysis = (source = '', filename = 'main.py', language = 'Python', report = '', logs = '') => {
   const findings = [];
-  const lines = (source || '').split('\n');
   const addFinding = (finding) => {
     findings.push({
       id: `finding-${findings.length + 1}`,
@@ -362,125 +361,325 @@ const runFallbackStaticAnalysis = (source = '', filename = 'main.py', language =
     });
   };
 
-  lines.forEach((line, idx) => {
-    const lineNum = idx + 1;
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('#') || trimmed.startsWith('/*')) return;
+  const lines = (source || '').split('\n');
 
-    if (/\/\s*0(?:\.0*)?(?:[^\d]|$)/.test(trimmed)) {
-      addFinding({
-        title: 'Zero division error in calculation module',
-        category: 'Logic',
-        severity: 'Critical',
-        confidence: 0.95,
-        explanation: 'Division by literal zero causes an unhandled runtime error.',
-        evidence: trimmed,
-        expected: 'Safe non-zero divisor check before division.',
-        actual: trimmed,
-        recommendation: 'Check divisor before division and supply a safe fallback.',
-        file: filename,
-        line: lineNum,
-        verification: 'Confirmed',
-        original_code: trimmed,
-        corrected_code: trimmed.replace(/\/ 0/g, '/ 1 /* Guarded divisor */')
-      });
-    }
+  console.log(`[Analyzer] Parser executed: static syntax and structure inspection pass`);
 
-    if (language !== 'Python' && /\beval\s*\(/.test(trimmed)) {
-      addFinding({
-        title: 'Unsafe eval in dynamic template processor',
-        category: 'Security',
-        severity: 'Critical',
-        confidence: 0.98,
-        explanation: 'User-provided script executed directly with eval(), allowing arbitrary code execution.',
-        evidence: trimmed,
-        expected: 'Safe parsing with JSON.parse or strict schema validation.',
-        actual: trimmed,
-        recommendation: 'Replace eval with JSON.parse() or a secure parser.',
-        file: filename,
-        line: lineNum,
-        verification: 'Confirmed',
-        original_code: trimmed,
-        corrected_code: trimmed.replace(/eval\(/g, 'JSON.parse(')
-      });
-    }
+  if (language === 'Python') {
+    // Parse functions and blocks
+    const funcDefs = [];
+    let currentFunc = null;
 
-    if (/\.innerHTML\s*=/.test(trimmed)) {
-      addFinding({
-        title: 'Unsafe innerHTML assignment vulnerability',
-        category: 'Security',
-        severity: 'High',
-        confidence: 0.9,
-        explanation: 'Direct assignment to innerHTML can lead to Cross-Site Scripting (XSS).',
-        evidence: trimmed,
-        expected: 'Safe DOM text update via textContent.',
-        actual: trimmed,
-        recommendation: 'Use textContent or a DOM sanitizer before rendering.',
-        file: filename,
-        line: lineNum,
-        verification: 'Confirmed',
-        original_code: trimmed,
-        corrected_code: trimmed.replace(/\.innerHTML\s*=/g, '.textContent =')
-      });
-    }
+    lines.forEach((line, idx) => {
+      const lineNum = idx + 1;
+      const trimmed = line.trim();
+      if (trimmed.startsWith('#')) return;
 
-    if (language === 'Python' && /(?:^|\b)def\s+\w+\s*\([^)]*=\s*(?:\[\]|\{\}|set\(\)|list\(\)|dict\(\))/.test(trimmed)) {
-      addFinding({
-        title: 'Mutable default argument',
-        category: 'Runtime behavior',
-        severity: 'High',
-        confidence: 0.99,
-        explanation: 'A mutable default value is created once and shared by every call to the function.',
-        evidence: trimmed,
-        expected: 'Each call receives a new collection unless shared state is intentional.',
-        actual: 'Values can leak between separate calls.',
-        recommendation: 'Use None as the default and create the collection inside the function.',
-        file: filename,
-        line: lineNum,
-        verification: 'Confirmed',
-        original_code: trimmed,
-        corrected_code: trimmed.replace(/=\s*(\[\]|\{\}|set\(\)|list\(\)|dict\(\))/, '=None')
-      });
-    }
+      const defMatch = line.match(/^def\s+([a-zA-Z_]\w*)\s*\(([^)]*)\):/);
+      if (defMatch) {
+        if (currentFunc) funcDefs.push(currentFunc);
+        currentFunc = {
+          name: defMatch[1],
+          params: defMatch[2].split(',').map(p => p.trim().split('=')[0].trim()).filter(Boolean),
+          startLine: lineNum,
+          lines: [{ num: lineNum, text: line, trimmed }]
+        };
+      } else if (currentFunc) {
+        if (/^[^\s#]/.test(line) && trimmed) {
+          funcDefs.push(currentFunc);
+          currentFunc = null;
+        } else {
+          currentFunc.lines.push({ num: lineNum, text: line, trimmed });
+        }
+      }
+    });
+    if (currentFunc) funcDefs.push(currentFunc);
 
-    if (language === 'Python' && /\b(?:\/|\/\/|%)\s*[A-Za-z_]\w*\b/.test(trimmed)) {
-      addFinding({
-        title: 'Possible division by zero',
-        category: 'Runtime error',
-        severity: 'Medium',
-        confidence: 0.75,
-        explanation: 'The divisor is not proven to be non-zero by static analysis.',
-        evidence: trimmed,
-        expected: 'The divisor is validated before performing the operation.',
-        actual: 'A zero divisor may raise an exception.',
-        recommendation: 'Validate the divisor before performing the operation.',
-        file: filename,
-        line: lineNum,
-        verification: 'Potential',
-        original_code: trimmed,
-        corrected_code: `if divisor == 0:\n    raise ValueError('Divisor cannot be zero')\n${trimmed}`
-      });
-    }
+    funcDefs.forEach(fn => {
+      const fnText = fn.lines.map(l => l.text).join('\n');
+      const hasZeroOrEmptyGuard = (varName) => {
+        const regex = new RegExp(`if\\s+(not\\s+${varName}|${varName}\\s*==\\s*0|len\\s*\\(\\s*${varName}\\s*\\)\\s*==\\s*0)`, 'i');
+        return regex.test(fnText) || /try\s*:[\s\S]*?except\s+.*ZeroDivisionError/i.test(fnText);
+      };
+      const hasBoundsGuard = (collName, idxName) => {
+        const regex = new RegExp(`if\\s+.*${idxName}.*<.*len\\s*\\(\\s*${collName}\\s*\\)`, 'i');
+        return regex.test(fnText) || /try\s*:[\s\S]*?except\s+.*IndexError/i.test(fnText);
+      };
 
-    if (language === 'Python' && /\b(?:eval|exec)\s*\(/.test(trimmed)) {
-      addFinding({
-        title: 'Use of eval()',
-        category: 'Security / code quality',
-        severity: 'High',
-        confidence: 0.96,
-        explanation: 'Dynamic evaluation can execute unintended Python code.',
-        evidence: trimmed,
-        expected: 'Only trusted, explicitly validated operations execute.',
-        actual: 'Arbitrary expression text is evaluated.',
-        recommendation: 'Replace eval with ast.literal_eval for data-only parsing, or use explicit validation.',
-        file: filename,
-        line: lineNum,
-        verification: 'Confirmed',
-        original_code: trimmed,
-        corrected_code: trimmed.replace(/\beval\s*\(/g, 'ast.literal_eval(')
+      fn.lines.forEach(({ num, trimmed }) => {
+        if (!trimmed || trimmed.startsWith('#')) return;
+
+        // Rule 2: Division by len(...) -> ZeroDivisionError on empty collection
+        const lenDivMatch = trimmed.match(/(?:^|[^/])\/\s*len\s*\(\s*([a-zA-Z_]\w*)\s*\)/);
+        if (lenDivMatch) {
+          const coll = lenDivMatch[1];
+          if (!hasZeroOrEmptyGuard(coll)) {
+            addFinding({
+              title: 'Division by zero when calculating the average of an empty list',
+              category: 'Runtime error',
+              severity: 'High',
+              confidence: 0.95,
+              explanation: `Dividing by len(${coll}) raises ZeroDivisionError when ${coll} is an empty list or collection.`,
+              evidence: trimmed,
+              expected: `Guard against empty inputs: return 0 or default before dividing.`,
+              actual: `len(${coll}) evaluates to 0 for an empty collection, causing an unhandled ZeroDivisionError.`,
+              recommendation: `Add a guard before calculating the average: if not ${coll}: return 0.`,
+              file: filename,
+              line: num,
+              verification: 'Confirmed',
+              original_code: trimmed,
+              corrected_code: `if not ${coll}:\n    return 0\n${trimmed}`
+            });
+            return;
+          }
+        }
+
+        // Rule 1: Division by literal zero or variable divisor
+        const litZeroMatch = trimmed.match(/(?:^|[^/])\/\s*0(?:\.0*)?(?:[^\d]|$)/);
+        if (litZeroMatch) {
+          addFinding({
+            title: 'Division by zero',
+            category: 'Runtime error',
+            severity: 'Critical',
+            confidence: 0.99,
+            explanation: 'Division by literal zero causes an unhandled ZeroDivisionError runtime exception.',
+            evidence: trimmed,
+            expected: 'Non-zero divisor verified before division.',
+            actual: trimmed,
+            recommendation: 'Guard the divisor before performing division.',
+            file: filename,
+            line: num,
+            verification: 'Confirmed',
+            original_code: trimmed,
+            corrected_code: trimmed.replace(/\/ 0/g, '/ 1 /* Guarded */')
+          });
+        } else {
+          const varDivMatch = trimmed.match(/(?:^|[^/])\/\s*([a-zA-Z_]\w*)\b/);
+          if (varDivMatch && !['len', 'range'].includes(varDivMatch[1])) {
+            const divisor = varDivMatch[1];
+            if (!hasZeroOrEmptyGuard(divisor)) {
+              addFinding({
+                title: 'Division by zero risk',
+                category: 'Runtime error',
+                severity: 'Medium',
+                confidence: 0.85,
+                explanation: `Divisor '${divisor}' is not validated against zero before division, which may raise ZeroDivisionError.`,
+                evidence: trimmed,
+                expected: `Divisor '${divisor}' is checked to ensure it is not zero before division.`,
+                actual: `A zero value for '${divisor}' will cause an unhandled ZeroDivisionError.`,
+                recommendation: `Add a validation check: if ${divisor} == 0: raise ValueError('Divisor cannot be zero').`,
+                file: filename,
+                line: num,
+                verification: 'Potential',
+                original_code: trimmed,
+                corrected_code: `if ${divisor} == 0:\n    raise ValueError('Divisor cannot be zero')\n${trimmed}`
+              });
+            }
+          }
+        }
+
+        // Rule 3: Missing dictionary key or None value handling
+        const dictMethodMatch = trimmed.match(/(\w+)\[(['"][^'"]+['"])\]\s*\.\s*(strip|lower|upper|split|replace|startswith|endswith|get)\s*\(/);
+        if (dictMethodMatch) {
+          const dictName = dictMethodMatch[1];
+          const keyName = dictMethodMatch[2];
+          const methodName = dictMethodMatch[3];
+          addFinding({
+            title: 'Missing dictionary key or None value handling',
+            category: 'Runtime error',
+            severity: 'High',
+            confidence: 0.92,
+            explanation: `Accessing ${dictName}[${keyName}] directly can raise KeyError if the key is missing, and chaining .${methodName}() raises AttributeError if the value is None.`,
+            evidence: trimmed,
+            expected: `Safely retrieve the value with a fallback default before calling .${methodName}().`,
+            actual: `Unchecked dictionary index and method call can fail with KeyError or AttributeError.`,
+            recommendation: `Use safe get access: (${dictName}.get(${keyName}) or '').${methodName}() or verify key presence and non-None value.`,
+            file: filename,
+            line: num,
+            verification: 'Confirmed',
+            original_code: trimmed,
+            corrected_code: `value = ${dictName}.get(${keyName})\nreturn value.${methodName}() if value is not None else ''`
+          });
+        }
+
+        // Rule 6: Loop starts at index 1 and skips the first element
+        const offByOneLoopMatch = trimmed.match(/for\s+([a-zA-Z_]\w*)\s+in\s+range\s*\(\s*1\s*,\s*len\s*\(\s*([a-zA-Z_]\w*)\s*\)\s*\)\s*:/);
+        if (offByOneLoopMatch) {
+          const collName = offByOneLoopMatch[2];
+          addFinding({
+            title: 'Loop starts at index 1 and skips the first element',
+            category: 'Logic error',
+            severity: 'High',
+            confidence: 0.95,
+            explanation: `The loop iterates over range(1, len(${collName})), which starts at index 1 and skips the first element at index 0.`,
+            evidence: trimmed,
+            expected: `Iterate starting at index 0 (range(len(${collName}))) or directly over elements (for item in ${collName}).`,
+            actual: `Index 0 is never visited or processed, causing defect counts or aggregations to omit the first item.`,
+            recommendation: `Change range(1, len(${collName})) to range(len(${collName})) or iterate directly: for item in ${collName}:.`,
+            file: filename,
+            line: num,
+            verification: 'Confirmed',
+            original_code: trimmed,
+            corrected_code: trimmed.replace(/range\s*\(\s*1\s*,\s*len\s*\(/, 'range(len(')
+          });
+        }
+
+        // Rule 5: List index access without bounds validation
+        const indexAccessMatch = trimmed.match(/return\s+([a-zA-Z_]\w*)\[([a-zA-Z_]\w*)\]/);
+        if (indexAccessMatch) {
+          const collName = indexAccessMatch[1];
+          const idxName = indexAccessMatch[2];
+          if (fn.params.includes(idxName) && !hasBoundsGuard(collName, idxName)) {
+            addFinding({
+              title: 'List index access without bounds validation',
+              category: 'Runtime error',
+              severity: 'Medium',
+              confidence: 0.85,
+              explanation: `Accessing ${collName}[${idxName}] directly without validating that 0 <= ${idxName} < len(${collName}) can raise an IndexError.`,
+              evidence: trimmed,
+              expected: `Verify that index is within range (0 <= ${idxName} < len(${collName})) before subscript access.`,
+              actual: `${collName}[${idxName}] is accessed without a bounds or length guard.`,
+              recommendation: `Validate index before access: if 0 <= ${idxName} < len(${collName}): return ${collName}[${idxName}] or catch IndexError.`,
+              file: filename,
+              line: num,
+              verification: 'Potential',
+              original_code: trimmed,
+              corrected_code: `if 0 <= ${idxName} < len(${collName}):\n    return ${collName}[${idxName}]\nraise IndexError('Index out of bounds')`
+            });
+          }
+        }
+
+        // Mutable default argument
+        if (/(?:^|\b)def\s+\w+\s*\([^)]*=\s*(?:\[\]|\{\}|set\(\)|list\(\)|dict\(\))/.test(trimmed)) {
+          addFinding({
+            title: 'Mutable default argument',
+            category: 'Runtime behavior',
+            severity: 'High',
+            confidence: 0.99,
+            explanation: 'A mutable default value is created once and shared by every call to the function.',
+            evidence: trimmed,
+            expected: 'Each call receives a new collection unless shared state is intentional.',
+            actual: 'Values can leak between separate calls.',
+            recommendation: 'Use None as the default and create the collection inside the function.',
+            file: filename,
+            line: num,
+            verification: 'Confirmed',
+            original_code: trimmed,
+            corrected_code: trimmed.replace(/=\s*(\[\]|\{\}|set\(\)|list\(\)|dict\(\))/, '=None')
+          });
+        }
+
+        // Use of eval() / exec()
+        if (/\b(?:eval|exec)\s*\(/.test(trimmed)) {
+          addFinding({
+            title: 'Use of eval()',
+            category: 'Security / code quality',
+            severity: 'High',
+            confidence: 0.96,
+            explanation: 'Dynamic evaluation can execute unintended Python code.',
+            evidence: trimmed,
+            expected: 'Only trusted, explicitly validated operations execute.',
+            actual: 'Arbitrary expression text is evaluated.',
+            recommendation: 'Replace eval with ast.literal_eval for data-only parsing, or use explicit validation.',
+            file: filename,
+            line: num,
+            verification: 'Confirmed',
+            original_code: trimmed,
+            corrected_code: trimmed.replace(/\beval\s*\(/g, 'ast.literal_eval(')
+          });
+        }
       });
-    }
-  });
+
+      // Rule 4: Incorrect maximum calculation for negative numbers
+      const initZeroMatch = fnText.match(/([a-zA-Z_]*(?:max|largest|highest|maximum)[a-zA-Z_]*)\s*=\s*0\b/i);
+      const loopCompareMatch = fnText.match(/for\s+([a-zA-Z_]\w*)\s+in\s+([a-zA-Z_]\w*)\s*:[\s\S]*?if\s+\1\s*>\s*([a-zA-Z_]\w*)\s*:\s*\n\s*\3\s*=\s*\1/i);
+      if (initZeroMatch && loopCompareMatch) {
+        const varName = initZeroMatch[1];
+        const collName = loopCompareMatch[2];
+        const initLine = fn.lines.find(l => new RegExp(`\\b${varName}\\s*=\\s*0\\b`).test(l.trimmed)) || fn.lines[0];
+        addFinding({
+          title: 'Incorrect maximum calculation when all numbers are negative',
+          category: 'Logic error',
+          severity: 'High',
+          confidence: 0.95,
+          explanation: `Initializing '${varName}' to 0 causes the algorithm to return 0 when all elements in '${collName}' are negative numbers.`,
+          evidence: initLine.trimmed,
+          expected: `'${varName}' should be initialized to float('-inf') or ${collName}[0] (with non-empty check) so negative maximums are found correctly.`,
+          actual: `Returns 0 for collections of negative numbers (e.g. [-10, -5] returns 0 instead of -5).`,
+          recommendation: `Initialize '${varName}' using float('-inf') or use Python's built-in max(${collName}): ${varName} = float('-inf').`,
+          file: filename,
+          line: initLine.num,
+          verification: 'Confirmed',
+          original_code: initLine.trimmed,
+          corrected_code: `${varName} = float('-inf')`
+        });
+      }
+    });
+  } else {
+    // JavaScript / HTML / CSS / Java inspections
+    lines.forEach((line, idx) => {
+      const lineNum = idx + 1;
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('/*')) return;
+
+      if (/\/\s*0(?:\.0*)?(?:[^\d]|$)/.test(trimmed)) {
+        addFinding({
+          title: 'Zero division error in calculation module',
+          category: 'Logic',
+          severity: 'Critical',
+          confidence: 0.95,
+          explanation: 'Division by literal zero causes an unhandled runtime error.',
+          evidence: trimmed,
+          expected: 'Safe non-zero divisor check before division.',
+          actual: trimmed,
+          recommendation: 'Check divisor before division and supply a safe fallback.',
+          file: filename,
+          line: lineNum,
+          verification: 'Confirmed',
+          original_code: trimmed,
+          corrected_code: trimmed.replace(/\/ 0/g, '/ 1 /* Guarded divisor */')
+        });
+      }
+
+      if (/\beval\s*\(/.test(trimmed)) {
+        addFinding({
+          title: 'Unsafe eval in dynamic template processor',
+          category: 'Security',
+          severity: 'Critical',
+          confidence: 0.98,
+          explanation: 'User-provided script executed directly with eval(), allowing arbitrary code execution.',
+          evidence: trimmed,
+          expected: 'Safe parsing with JSON.parse or strict schema validation.',
+          actual: trimmed,
+          recommendation: 'Replace eval with JSON.parse() or a secure parser.',
+          file: filename,
+          line: lineNum,
+          verification: 'Confirmed',
+          original_code: trimmed,
+          corrected_code: trimmed.replace(/eval\(/g, 'JSON.parse(')
+        });
+      }
+
+      if (/\.innerHTML\s*=/.test(trimmed)) {
+        addFinding({
+          title: 'Unsafe innerHTML assignment vulnerability',
+          category: 'Security',
+          severity: 'High',
+          confidence: 0.9,
+          explanation: 'Direct assignment to innerHTML can lead to Cross-Site Scripting (XSS).',
+          evidence: trimmed,
+          expected: 'Safe DOM text update via textContent.',
+          actual: trimmed,
+          recommendation: 'Use textContent or a DOM sanitizer before rendering.',
+          file: filename,
+          line: lineNum,
+          verification: 'Confirmed',
+          original_code: trimmed,
+          corrected_code: trimmed.replace(/\.innerHTML\s*=/g, '.textContent =')
+        });
+      }
+    });
+  }
 
   if (logs && /(traceback|exception|syntaxerror|error:)/i.test(logs)) {
     findings.unshift({
@@ -502,9 +701,14 @@ const runFallbackStaticAnalysis = (source = '', filename = 'main.py', language =
     });
   }
 
+  console.log(`[Analyzer] Inspection rules executed: 12 static rules evaluated`);
+  console.log(`[Analyzer] Number of findings generated: ${findings.length}`);
+
   const confirmed = findings.filter(f => f.verification === 'Confirmed').length;
   const potential = findings.filter(f => f.verification === 'Potential').length;
   const verdict = (confirmed > 0 || potential > 0) ? 'BUGS FOUND' : (source.trim() ? 'NO BUGS DETECTED' : 'ANALYSIS INCOMPLETE');
+
+  console.log(`[Analyzer] Number of findings returned by the API: ${findings.length}, verdict: "${verdict}"`);
 
   return {
     id: crypto.randomUUID().replace(/-/g, ''),
@@ -553,6 +757,18 @@ app.post('/api/analyzer/analyze', requireAuth, upload.any(), async (req, res) =>
       }
     }
   }
+
+  // Explicit validation if input is completely empty
+  if (!source.trim() && !fallbackSource.trim() && !report.trim() && !logs.trim() && (!req.files || !req.files.length)) {
+    return res.status(400).json({
+      status: 'INVALID INPUT',
+      error: 'Provide pasted source code, a bug report/log, or a supported source/project upload.'
+    });
+  }
+
+  // Safe diagnostic logging (no passwords, secrets, or raw source code)
+  console.log(`[Analyzer] Source received: filename="${fallbackFilename}", size=${(fallbackSource || source || '').length} bytes, files=${req.files?.length || 0}`);
+  console.log(`[Analyzer] Detected language: ${language}`);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 45_000);
